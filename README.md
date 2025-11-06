@@ -12,8 +12,10 @@ Automates watching Kick.com streams to accumulate drop time. Comes with a compac
 - Queue runner: processes items top-to-bottom, skips finished, retries offline items later
 - Smart timer: counts only while the stream is LIVE; auto-resumes after cuts
 - Cookie helper: open a browser window to sign in and save cookies per domain
+- Faster option: if `browser_cookie3` is installed, the app automatically imports cookies from your browsers (Chrome/Edge/Firefox) for the domain and saves them under `./cookies/`.
 - Playback controls: Mute, Hide Player, Mini Player overlay, Dark Mode (remembered)
 - Local persistence: `config.json`, per-domain cookies under `./cookies/`, and Chrome profile under `./chrome_data/`
+- Rate‑limit friendly: caches “is live?” API checks per item to reduce request frequency
 
 ## Screenshot
 
@@ -37,7 +39,7 @@ Automates watching Kick.com streams to accumulate drop time. Comes with a compac
 
 2) Install dependencies
 
-   - `pip install customtkinter pillow selenium webdriver-manager`
+   - `pip install customtkinter pillow selenium webdriver-manager undetected-chromedriver`
 
 3) Run
 
@@ -47,9 +49,11 @@ Automates watching Kick.com streams to accumulate drop time. Comes with a compac
 ## Sign In and Cookies
 
 - Reliable drop tracking typically requires being signed in to Kick.
-- In the app, click “Sign in (cookies)”, confirm to open a Chrome window for the site (e.g., `kick.com`).
+- In the app, click “Sign in (cookies)”. If `browser_cookie3` is installed, cookies for the selected domain are imported automatically from your browser profile.
+- Otherwise, confirm to open a Chrome window for the site (e.g., `kick.com`).
 - Complete login in the opened window, then click “OK” in the app to save cookies.
 - Cookies are saved per domain in `./cookies/` (e.g., `cookies/kick.com.json`).
+  - Tip: install `browser_cookie3` to import cookies without logging in: `pip install browser_cookie3`
 
 ## Add Links
 
@@ -76,6 +80,13 @@ Automates watching Kick.com streams to accumulate drop time. Comes with a compac
 - The overlay is small and muted by default, to stay out of your way.
 - The main Chrome window is reduced and repositioned while Mini Player is active.
 
+### Window visibility rules
+
+- Hide Player ON → Chrome runs headless (fully hidden)
+- Hide Player OFF + Mini Player OFF → visible normal window
+- Mini Player ON → visible mini window (overrides Hide Player)
+- Chrome extension (.crx) loaded → always visible (Chrome disallows headless with .crx)
+
 ## Data & Persistence
 
 - `config.json`: app state and preferences
@@ -100,6 +111,14 @@ Automates watching Kick.com streams to accumulate drop time. Comes with a compac
 - Timer doesn’t increment
   - Make sure you’re signed in (use “Sign in (cookies)” to save cookies).
   - The timer only increases while the stream is actually LIVE.
+
+- Too Many Requests (429) during login
+  - The site may rate‑limit login attempts if repeated in a short period.
+  - Prefer importing cookies from your browser: `pip install browser_cookie3`, then click “Sign in (cookies)”. No login page hit, no 429.
+  - If you must retry login, wait 10–20 minutes between attempts. Keep the persistent profile in `chrome_data/` to avoid logging in again.
+
+- Noisy Chrome/DevTools logs in console
+  - The app reduces Chrome logging (exclude switches, lower log level). Some third‑party warnings are harmless and can be ignored.
 
 - UI too small in Mini Player
   - Mini Player reduces the window size and overlays a small preview. Disable “Mini player” for a normal window.

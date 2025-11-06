@@ -20,7 +20,7 @@ echo Checking Python packages...
 if errorlevel 1 (
   echo Installing required packages: selenium, webdriver-manager
   %PYCMD% -m pip install --upgrade pip
-  %PYCMD% -m pip install customtkinter pillow selenium webdriver-manager
+  %PYCMD% -m pip install customtkinter pillow selenium webdriver-manager undetected-chromedriver
   if errorlevel 1 (
     echo Failed to install dependencies. Check your internet connection and try again.
     exit /b 1

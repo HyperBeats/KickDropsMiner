@@ -6,17 +6,15 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from urllib.parse import urlparse
 import urllib.request
+import random
 
 # --- UI moderne
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
-# --- Selenium
-from selenium import webdriver
+# --- Selenium avec undetected-chromedriver
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_DIR = os.path.join(APP_DIR, "cookies")
@@ -224,6 +222,57 @@ class CookieManager:
                 pass
         return True
 
+    @staticmethod
+    def import_from_browser(domain: str) -> bool:
+        """Tente d'importer les cookies existants depuis les navigateurs (Chrome/Edge/Firefox)
+        à l'aide de browser_cookie3. Renvoie True si un fichier a été écrit.
+        """
+        try:
+            import browser_cookie3 as bc3  # type: ignore
+        except Exception:
+            return False
+
+        try:
+            cj = bc3.load(domain_name=domain)
+        except Exception:
+            cj = None
+
+        if not cj:
+            return False
+
+        cookies = []
+        try:
+            for c in cj:
+                if not getattr(c, "name", None):
+                    continue
+                cookie = {
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": getattr(c, "domain", domain) or domain,
+                    "path": getattr(c, "path", "/") or "/",
+                    "secure": bool(getattr(c, "secure", False)),
+                }
+                exp = getattr(c, "expires", None)
+                if exp is not None:
+                    try:
+                        cookie["expiry"] = int(exp)
+                    except Exception:
+                        pass
+                cookies.append(cookie)
+        except Exception:
+            return False
+
+        if not cookies:
+            return False
+
+        path = cookie_file_for_domain(domain)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cookies, f, indent=2)
+            return True
+        except Exception:
+            return False
+
 def make_chrome_driver(
     headless=True,
     visible_width=1280,
@@ -231,9 +280,9 @@ def make_chrome_driver(
     driver_path=None,
     extension_path=None,
 ):
-    opts = Options()
+    opts = uc.ChromeOptions()  # Utilise les options d'undetected-chromedriver
 
-    # Headless moderne (repli si indisponible)
+    # Configuration headless (adaptée pour uc)
     if headless:
         try:
             opts.add_argument("--headless=new")
@@ -246,12 +295,16 @@ def make_chrome_driver(
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-blink-features=AutomationControlled")
+    # Suppression des options expérimentales redondantes pour éviter l'erreur de parsing
+    # (undetected-chromedriver gère déjà cela nativement)
+    opts.add_argument("--log-level=3")
+    opts.add_argument("--silent")
 
     user_data_dir = os.path.join(APP_DIR, "chrome_data")
     os.makedirs(user_data_dir, exist_ok=True)
     opts.add_argument(f"--user-data-dir={user_data_dir}")
 
-    # Chargement éventuel d’une extension
+    # Chargement d'extension (compatible avec uc)
     if extension_path:
         try:
             if extension_path.lower().endswith(".crx"):
@@ -261,12 +314,10 @@ def make_chrome_driver(
         except Exception:
             pass
 
-    if driver_path:
-        service = Service(driver_path)
-    else:
-        service = Service(ChromeDriverManager().install())
+    # Création du driver avec undetected-chromedriver
+    # (driver_path n'est plus nécessaire, car uc gère le téléchargement automatique)
+    driver = uc.Chrome(options=opts, version_main=None)  # version_main=None pour la dernière version
 
-    driver = webdriver.Chrome(service=service, options=opts)
     return driver
 
 # ===============================
@@ -300,13 +351,21 @@ class StreamWorker(threading.Thread):
         self.mute = mute
         self.mini_player = mini_player
         self.completed = False
+        # Anti rate-limit: cache "is live" checks
+        self._last_live_check = 0.0
+        self._last_live_value = True
+        self._live_check_interval = 30  # seconds
 
     def run(self):
         domain = domain_from_url(self.url)
         try:
             # Si on charge un .crx, Chrome ne peut pas être headless
-            use_headless = not (self.extension_path and self.extension_path.endswith(".crx"))
+            use_headless = bool(self.hide_player)
+            # Si mini_player activé, force visible pour afficher la petite fenêtre
             if self.mini_player:
+                use_headless = False
+            # Si hide_player activé, force headless pour masquer la fenêtre entière (sauf si mini_player prioritaire)
+            if self.extension_path and self.extension_path.endswith(".crx"):
                 use_headless = False
 
             self.driver = make_chrome_driver(
@@ -368,14 +427,26 @@ class StreamWorker(threading.Thread):
         self.stop_event.set()
 
     def is_stream_live(self):
+        now = time.time()
+        # Cache API checks to reduce rate-limit risk
+        if now - self._last_live_check < self._live_check_interval:
+            return self._last_live_value
         try:
             # On combine API + fallback DOM
             if kick_is_live_by_api(self.url):
+                self._last_live_value = True
                 return True
             body = self.driver.find_element(By.TAG_NAME, "body").text
-            return "LIVE" in body.upper()
+            self._last_live_value = ("LIVE" in body.upper())
+            return self._last_live_value
         except Exception:
+            self._last_live_value = False
             return False
+        finally:
+            # add slight jitter to desync multiple workers
+            jitter = random.uniform(-5, 5)
+            self._live_check_interval = max(10, 30 + jitter)
+            self._last_live_check = now
 
     def ensure_player_state(self):
         try:
@@ -485,6 +556,7 @@ class App(ctk.CTk):
 
         self.config_data = Config()
         self.workers = {}
+        self._interactive_driver = None  # Chrome pour capture de cookies
         self.queue_running = False
         self.queue_current_idx = None
 
@@ -524,6 +596,11 @@ class App(ctk.CTk):
         self.status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0,10))
 
         self.refresh_list()
+        # Fermer proprement tous les navigateurs à la fermeture de l'app
+        try:
+            self.protocol("WM_DELETE_WINDOW", self.on_close)
+        except Exception:
+            pass
 
     # ----------- UI construction -----------
     def _build_sidebar(self):
@@ -763,8 +840,16 @@ class App(ctk.CTk):
 
         cookie_path = cookie_file_for_domain(domain)
         if not os.path.exists(cookie_path):
-            if messagebox.askyesno(self.t("cookies_missing_title"), self.t("cookies_missing_msg")):
-                self.obtain_cookies_interactively(item["url"], domain)
+            # Essaye d'abord d'importer automatiquement depuis le navigateur
+            try:
+                if CookieManager.import_from_browser(domain):
+                    self.status_var.set(self.t("cookies_saved_for", domain=domain))
+                else:
+                    if messagebox.askyesno(self.t("cookies_missing_title"), self.t("cookies_missing_msg")):
+                        self.obtain_cookies_interactively(item["url"], domain)
+            except Exception:
+                if messagebox.askyesno(self.t("cookies_missing_title"), self.t("cookies_missing_msg")):
+                    self.obtain_cookies_interactively(item["url"], domain)
 
         stop_event = threading.Event()
         worker = StreamWorker(
@@ -828,6 +913,7 @@ class App(ctk.CTk):
                 driver_path=self.config_data.chromedriver_path,
                 extension_path=self.config_data.extension_path,
             )
+            self._interactive_driver = drv
         except Exception as e:
             messagebox.showerror(self.t("error"), self.t("chrome_start_fail", e=e))
             return
@@ -843,6 +929,54 @@ class App(ctk.CTk):
                 drv.quit()
             except Exception:
                 pass
+            finally:
+                self._interactive_driver = None
+
+    def on_close(self):
+        # Arrête la file et ferme toutes les fenêtres de navigateur
+        try:
+            self.queue_running = False
+        except Exception:
+            pass
+
+        # Ferme la fenêtre Chrome d'import cookies si ouverte
+        try:
+            if self._interactive_driver:
+                try:
+                    self._interactive_driver.quit()
+                except Exception:
+                    pass
+                self._interactive_driver = None
+        except Exception:
+            pass
+
+        # Stoppe et ferme tous les drivers Selenium des workers
+        for idx, w in list(self.workers.items()):
+            try:
+                w.stop()
+            except Exception:
+                pass
+            try:
+                if getattr(w, "driver", None):
+                    try:
+                        w.driver.quit()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Attend brièvement l'arrêt des threads
+        for idx, w in list(self.workers.items()):
+            try:
+                w.join(timeout=2.5)
+            except Exception:
+                pass
+
+        # Ferme l'application
+        try:
+            self.destroy()
+        except Exception:
+            os._exit(0)
 
     def connect_to_kick(self):
         sel = self.tree.selection()
@@ -853,6 +987,14 @@ class App(ctk.CTk):
         else:
             url = "https://kick.com"
             domain = "kick.com"
+        # Tentative d'import automatique des cookies depuis le navigateur
+        try:
+            if CookieManager.import_from_browser(domain):
+                messagebox.showinfo(self.t("ok"), self.t("cookies_saved_for", domain=domain))
+                return
+        except Exception:
+            pass
+        # Sinon, repli sur la méthode interactive existante
         if messagebox.askyesno(self.t("connect_title"), self.t("open_url_to_get_cookies", url=url)):
             self.obtain_cookies_interactively(url, domain)
 

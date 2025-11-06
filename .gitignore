@@ -1,0 +1,6 @@
+# Ignore lo*cal app data
+cookies/*
+chrome_data/*
+config.json*
+config.json
+__pycache__/
