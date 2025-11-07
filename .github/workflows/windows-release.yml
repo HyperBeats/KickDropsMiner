@@ -49,7 +49,7 @@ jobs:
       - name: Build executable
         shell: bash
         run: |
-          pyinstaller --noconfirm --clean --onefile \
+          pyinstaller --noconfirm --noconsole --clean --onefile \
             --name KickDropsMiner \
             --icon assets/app.ico \
             main.py
@@ -78,12 +78,6 @@ jobs:
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath
           Write-Host "Created $zipPath"
-
-      - name: Upload build artifact (ZIP)
-        uses: actions/upload-artifact@v4
-        with:
-          name: KickDropsMiner-windows-zip
-          path: release/*.zip
 
       - name: Create GitHub Release and upload asset
         if: startsWith(github.ref, 'refs/tags/')
