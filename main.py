@@ -50,6 +50,7 @@ BUILTIN_TRANSLATIONS = {
         "label_language": "Langue",
         "language_fr": "Français",
         "language_en": "English",
+        "language_tr": "Turc",
         "prompt_live_url_title": "Live URL",
         "prompt_live_url_msg": "Entre l'URL Kick du live :",
         "prompt_minutes_title": "Objectif (minutes)",
@@ -121,6 +122,7 @@ BUILTIN_TRANSLATIONS = {
         "label_language": "Language",
         "language_fr": "Français",
         "language_en": "English",
+        "language_tr": "Turkish",
         "prompt_live_url_title": "Live URL",
         "prompt_live_url_msg": "Enter the Kick live URL:",
         "prompt_minutes_title": "Target (minutes)",
@@ -176,7 +178,7 @@ BUILTIN_TRANSLATIONS = {
 
 def _load_external_translations():
     data = {}
-    for lang in ("fr", "en"):
+    for lang in ("fr", "en", "tr"):
         path = os.path.join(APP_DIR, "locales", lang, "messages.json")
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -188,7 +190,7 @@ def _load_external_translations():
 
 def _merge_fallback(external, builtin):
     result = {}
-    for lang in ("fr", "en"):
+    for lang in ("fr", "en", "tr"):
         merged = dict(builtin.get(lang, {}))
         merged.update(external.get(lang, {}))
         result[lang] = merged
@@ -932,7 +934,7 @@ class App(ctk.CTk):
         )
         theme_menu.grid(row=13, column=0, padx=14, pady=(0, 14), sticky="w")
 
-        # Langue
+        # Language (only FR/EN in dropdown for now)
         self.lang_var = tk.StringVar(
             value=self.t("language_fr")
             if self.config_data.language == "fr"
@@ -1083,22 +1085,38 @@ class App(ctk.CTk):
     # ----------- Language -----------
     def change_language(self, choice):
         # Map the choice to fr/en
-        new_lang = "fr" if "fr".lower() in choice.lower() else "en"
+        new_lang = "fr" if "français" in choice.lower() else "en"
+        
+        if new_lang == self.config_data.language:
+            return  # No change needed
+            
         self.config_data.language = new_lang
         self.config_data.save()
+        
         # Rebuild sidebar & content to refresh text
-        for w in self.sidebar.winfo_children():
-            w.destroy()
-        self._build_sidebar()
-        for w in self.content.winfo_children():
-            w.destroy()
-        self._build_content()
+        try:
+            for w in self.sidebar.winfo_children():
+                w.destroy()
+            self._build_sidebar()
+        except Exception:
+            pass
+            
+        try:
+            for w in self.content.winfo_children():
+                w.destroy()
+            self._build_content()
+        except Exception:
+            pass
+            
         # Update status bar if it's at the initial text
-        if self.status_var.get() in (
-            translate("fr", "status_ready"),
-            translate("en", "status_ready"),
-        ):
-            self.status_var.set(self.t("status_ready"))
+        try:
+            if self.status_var.get() in (
+                translate("fr", "status_ready"),
+                translate("en", "status_ready"),
+            ):
+                self.status_var.set(self.t("status_ready"))
+        except Exception:
+            pass
 
     # ----------- Actions -----------
     def refresh_list(self):

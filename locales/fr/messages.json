@@ -19,6 +19,7 @@
   "label_language": "Langue",
   "language_fr": "Français",
   "language_en": "English",
+  "language_tr": "Turc",
   "prompt_live_url_title": "Live URL",
   "prompt_live_url_msg": "Entre l'URL Kick du live :",
   "prompt_minutes_title": "Objectif (minutes)",

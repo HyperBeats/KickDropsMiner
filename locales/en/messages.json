@@ -19,6 +19,7 @@
   "label_language": "Language",
   "language_fr": "Français",
   "language_en": "English",
+  "language_tr": "Turkish",
   "prompt_live_url_title": "Live URL",
   "prompt_live_url_msg": "Enter the Kick live URL:",
   "prompt_minutes_title": "Target (minutes)",
