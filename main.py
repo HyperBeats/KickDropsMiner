@@ -142,26 +142,30 @@ BUILTIN_TRANSLATIONS = {
 
 def _load_external_translations():
     data = {}
-    for lang in ("fr", "en"):
-        path = os.path.join(APP_DIR, "locales", lang, "messages.json")
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data[lang] = json.load(f)
-        except Exception:
-            data[lang] = {}
+    locale_dir = os.path.join(APP_DIR, "locales")
+    if not os.path.exists(locale_dir):
+        return data
+    for lang in os.listdir(locale_dir):
+        path = os.path.join(locale_dir, lang, "messages.json")
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data[lang] = json.load(f)
+            except Exception:
+                data[lang] = {}
     return data
 
 def _merge_fallback(external, builtin):
     result = {}
-    for lang in ("fr", "en"):
+    all_langs = set(external.keys()) | set(builtin.keys())
+    for lang in all_langs:
         merged = dict(builtin.get(lang, {}))
         merged.update(external.get(lang, {}))
         result[lang] = merged
     return result
 
-# Charge les traductions depuis les fichiers si présents, avec repli sur les valeurs intégrées
+# Loads translations from files if present, with fallback to embedded values
 TRANSLATIONS = _merge_fallback(_load_external_translations(), BUILTIN_TRANSLATIONS)
-
 def translate(lang: str, key: str) -> str:
     return TRANSLATIONS.get(lang or "fr", TRANSLATIONS.get("fr", {})).get(key, key)
 
@@ -665,16 +669,27 @@ class App(ctk.CTk):
         theme_menu = ctk.CTkOptionMenu(self.sidebar, values=[self.t("theme_dark"), self.t("theme_light")], command=self.change_theme, variable=self.theme_var, width=180)
         theme_menu.grid(row=12, column=0, padx=14, pady=(0,14), sticky="w")
 
-        # Langue
-        self.lang_var = tk.StringVar(value=self.t("language_fr") if self.config_data.language == "fr" else self.t("language_en"))
+        # Language
+        locale_dir = os.path.join(APP_DIR, "locales")
+        langs = [d for d in os.listdir(locale_dir) 
+                if os.path.isfile(os.path.join(locale_dir, d, "messages.json"))]
+
+        names = [self.t(f"language_{code}") if self.t(f"language_{code}") != f"language_{code}" else code.upper() 
+                for code in langs]
+
+        self.lang_var = tk.StringVar(value=self.t(f"language_{self.config_data.language}") or self.config_data.language.upper())
+
         lang_label = ctk.CTkLabel(self.sidebar, text=self.t("label_language"))
         lang_label.grid(row=13, column=0, padx=14, pady=(4,4), sticky="w")
-        lang_menu = ctk.CTkOptionMenu(self.sidebar,
-                                      values=[self.t("language_fr"), self.t("language_en")],
-                                      command=self.change_language,
-                                      variable=self.lang_var,
-                                      width=180)
-        lang_menu.grid(row=14, column=0, padx=14, pady=(0,14), sticky="w")
+
+        self.lang_menu = ctk.CTkOptionMenu(self.sidebar,
+                                        values=names,
+                                        command=self.change_language,
+                                        variable=self.lang_var,
+                                        width=180)
+        self.lang_menu.grid(row=14, column=0, padx=14, pady=(0,14), sticky="w")
+
+        self.lang_map = dict(zip(names, langs))
 
     def _build_content(self):
         header = ctk.CTkFrame(self.content, corner_radius=12)
@@ -757,22 +772,28 @@ class App(ctk.CTk):
         self._build_content()
         self.refresh_list()
 
-    # ----------- Langue -----------
+    # ----------- Language -----------
     def change_language(self, choice):
-        # Mappe le choix vers fr/en
-        new_lang = "fr" if "fr".lower() in choice.lower() else "en"
+        new_lang = self.lang_map.get(choice) or "en"
+        if self.config_data.language == new_lang:
+            return
+
         self.config_data.language = new_lang
         self.config_data.save()
-        # Rebuild sidebar & content pour rafraîchir les textes
+
+        # Rebuild UI
         for w in self.sidebar.winfo_children():
             w.destroy()
         self._build_sidebar()
         for w in self.content.winfo_children():
             w.destroy()
         self._build_content()
-        # Met à jour la barre de statut si elle est au texte initial
-        if self.status_var.get() in (translate("fr", "status_ready"), translate("en", "status_ready")):
+
+        # Update status
+        if self.status_var.get() in [translate(l, "status_ready") for l in self.lang_map.values()]:
             self.status_var.set(self.t("status_ready"))
+        else:
+            self.status_var.set(self.t("status_ready") or "Ready")
 
     # ----------- Actions -----------
     def refresh_list(self):
