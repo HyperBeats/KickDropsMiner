@@ -674,10 +674,14 @@ class App(ctk.CTk):
         langs = [d for d in os.listdir(locale_dir) 
                 if os.path.isfile(os.path.join(locale_dir, d, "messages.json"))]
 
-        names = [self.t(f"language_{code}") if self.t(f"language_{code}") != f"language_{code}" else code.upper() 
-                for code in langs]
+        # Use each language's own file to get its name
+        names = []
+        for code in langs:
+            name = translate(code, f"language_{code}")
+            names.append(name if name != f"language_{code}" else code.upper())
 
-        self.lang_var = tk.StringVar(value=self.t(f"language_{self.config_data.language}") or self.config_data.language.upper())
+        self.lang_var = tk.StringVar(value=translate(self.config_data.language, f"language_{self.config_data.language}") 
+                                    or self.config_data.language.upper())
 
         lang_label = ctk.CTkLabel(self.sidebar, text=self.t("label_language"))
         lang_label.grid(row=13, column=0, padx=14, pady=(4,4), sticky="w")
