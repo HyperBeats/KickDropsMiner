@@ -10,6 +10,7 @@ import random
 from io import BytesIO
 import base64
 import re
+from kick_inventory import get_drop_info, is_drop_really_acquired
 
 # --- UI moderne
 import customtkinter as ctk
@@ -526,6 +527,7 @@ class StreamWorker(threading.Thread):
         hide_player=False,
         mute=True,
         mini_player=False,
+        drop_title="",    
     ):
         super().__init__(daemon=True)
         self.url = url
@@ -545,6 +547,11 @@ class StreamWorker(threading.Thread):
         self._last_live_check = 0.0
         self._last_live_value = True
         self._live_check_interval = 30  # seconds
+        # --- suivi drop ---
+        self.drop_title = drop_title or ""
+        self.drop_info = None
+        self._last_inventory_check = 0.0
+        self._inventory_check_interval = 600  # check inventaire toutes les 10 min
 
     def run(self):
         domain = domain_from_url(self.url)
@@ -601,6 +608,24 @@ class StreamWorker(threading.Thread):
                 ):
                     self.completed = True
                     break
+
+                # --- suivi inventaire Kick pour un drop précis ---
+                now = time.time()
+                if self.drop_title and now - self._last_inventory_check >= self._inventory_check_interval:
+                    self._last_inventory_check = now
+                    try:
+                        info = get_drop_info(self.drop_title, domain=domain)
+                        self.drop_info = info
+                        if info:
+                            status = (info.get("status") or "").lower()
+                            # On considère que "ready_to_claim" ou "claimed" = drop terminé
+                            if status in ("ready_to_claim", "claimed"):
+                                print(f"[WORKER] Drop '{self.drop_title}' status={status} -> stop worker.")
+                                self.completed = True
+                                break
+                    except Exception as inv_e:
+                        print("[INVENTORY] error:", inv_e)
+
                 time.sleep(1)
         except Exception as e:
             print("StreamWorker error:", e)
@@ -730,8 +755,12 @@ class Config:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
-    def add(self, url, minutes):
-        self.items.append({"url": url, "minutes": minutes})
+    def add(self, url, minutes, drop_title=""):
+        self.items.append({
+            "url": url,
+            "minutes": minutes,
+            "drop_title": drop_title or "",
+        })
         self.save()
 
     def remove(self, idx):
@@ -1022,16 +1051,19 @@ class App(ctk.CTk):
 
         self.tree = ttk.Treeview(
             table_frame,
-            columns=("url", "minutes", "elapsed"),
+            columns=("url", "minutes", "elapsed", "drop"),
             show="headings",
             selectmode="browse",
         )
         self.tree.heading("url", text="URL")
         self.tree.heading("minutes", text=self.t("col_minutes"))
         self.tree.heading("elapsed", text=self.t("col_elapsed"))
-        self.tree.column("url", width=600, anchor="w")
+        self.tree.heading("drop", text="Drop")
+
+        self.tree.column("url", width=500, anchor="w")
         self.tree.column("minutes", width=130, anchor="center")
         self.tree.column("elapsed", width=140, anchor="center")
+        self.tree.column("drop", width=220, anchor="w")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
@@ -1170,16 +1202,31 @@ class App(ctk.CTk):
     def refresh_list(self):
         for r in self.tree.get_children():
             self.tree.delete(r)
+
         for i, item in enumerate(self.config_data.items):
             elapsed = self.workers[i].elapsed_seconds if i in self.workers else 0
+
+            # Texte pour la colonne Drop
+            drop_title = item.get("drop_title", "") or ""
+            drop_state = ""
+            if i in self.workers:
+                info = getattr(self.workers[i], "drop_info", None)
+                if info:
+                    drop_state = info.get("raw_status_text") or info.get("status", "")
+            if drop_title or drop_state:
+                drop_text = drop_title if not drop_state else f"{drop_title} ({drop_state})"
+            else:
+                drop_text = ""
+
             tags = ["odd" if i % 2 else "even"]
             if item.get("finished"):
                 tags.append("finished")
+
             self.tree.insert(
                 "",
                 "end",
                 iid=str(i),
-                values=(item["url"], item["minutes"], f"{elapsed}s"),
+                values=(item["url"], item["minutes"], f"{elapsed}s", drop_text),
                 tags=tuple(tags),
             )
 
@@ -1194,7 +1241,16 @@ class App(ctk.CTk):
         minutes = simpledialog.askinteger(
             self.t("prompt_minutes_title"), self.t("prompt_minutes_msg"), minvalue=0
         )
-        self.config_data.add(url, minutes or 0)
+
+        drop_title = simpledialog.askstring(
+            "Drop title",
+            "Nom (ou une partie) du drop à surveiller\n"
+            "(ex: 'KICK Hazmat' ; laisse vide si aucun suivi spécifique) :"
+        )
+        if not drop_title:
+            drop_title = ""
+
+        self.config_data.add(url, minutes or 0, drop_title)
         self.refresh_list()
         self.status_var.set(self.t("status_link_added"))
 
@@ -1269,6 +1325,7 @@ class App(ctk.CTk):
             hide_player=bool(self.hide_player_var.get()),
             mute=bool(self.mute_var.get()),
             mini_player=bool(self.mini_player_var.get()),
+            drop_title=item.get("drop_title", ""),
         )
         self.workers[idx] = worker
         worker.start()
@@ -2161,29 +2218,63 @@ class App(ctk.CTk):
     # ----------- Callbacks Worker -----------
     def on_worker_update(self, idx, seconds, live):
         def ui_update():
+            # Ligne existante
             if str(idx) in self.tree.get_children():
                 values = list(self.tree.item(str(idx), "values"))
+
+                # S'assurer qu'on a bien 4 colonnes
+                if len(values) < 4:
+                    values += [""] * (4 - len(values))
+
+                # Colonne Écoulé
                 tag = self.t("tag_live") if live else self.t("tag_paused")
                 values[2] = f"{seconds}s ({tag})"
+
+                # Colonne Drop
+                try:
+                    item = self.config_data.items[idx]
+                except IndexError:
+                    item = {}
+
+                drop_title = item.get("drop_title", "") or ""
+                drop_state = ""
+                w = self.workers.get(idx)
+                if w is not None:
+                    info = getattr(w, "drop_info", None)
+                    if info:
+                        drop_state = info.get("raw_status_text") or info.get("status", "")
+
+                if drop_title or drop_state:
+                    drop_text = drop_title if not drop_state else f"{drop_title} ({drop_state})"
+                else:
+                    drop_text = ""
+                values[3] = drop_text
+
+                self.tree.item(str(idx), values=values)
+
                 current_tags = set(self.tree.item(str(idx), "tags") or [])
                 if live:
                     current_tags.discard("paused")
                 else:
                     current_tags.add("paused")
-                self.tree.item(str(idx), values=values, tags=tuple(current_tags))
-            
-            # Update status bar with elapsed time
+                self.tree.item(str(idx), tags=tuple(current_tags))
+
+            # Mise à jour barre de statut (comme tu l’avais déjà)
             if idx < len(self.config_data.items):
                 item = self.config_data.items[idx]
                 minutes = seconds // 60
                 secs = seconds % 60
                 time_str = f"{minutes}m {secs}s" if minutes > 0 else f"{secs}s"
                 status = self.t("tag_live") if live else self.t("tag_paused")
-                
+
                 if self.queue_running and self.queue_current_idx == idx:
-                    self.status_var.set(f"{self.t('queue_running_status', url=item['url'])} - {time_str} ({status})")
+                    self.status_var.set(
+                        f"{self.t('queue_running_status', url=item['url'])} - {time_str} ({status})"
+                    )
                 else:
-                    self.status_var.set(f"{self.t('status_playing', url=item['url'])} - {time_str} ({status})")
+                    self.status_var.set(
+                        f"{self.t('status_playing', url=item['url'])} - {time_str} ({status})"
+                    )
 
         self.after(0, ui_update)
 
