@@ -70,5 +70,15 @@
   "drops_added": "Ajouté: {channel}",
   "drops_watch_minutes": "Minutes à regarder:",
   "warning": "Attention",
-  "cannot_edit_active_stream": "Impossible de modifier la durée d'un stream actif. Veuillez d'abord l'arrêter."
+  "cannot_edit_active_stream": "Impossible de modifier la durée d'un stream actif. Veuillez d'abord l'arrêter.",
+  "drops_tab_campaigns": "Campagnes",
+  "drops_tab_progress": "Ma progression",
+  "drops_progress_loading": "Chargement de la progression...",
+  "drops_progress_error": "Erreur lors du chargement",
+  "drops_progress_no_data": "Aucune donnée de progression disponible",
+  "drops_progress_loaded": "{total} campagne(s) chargée(s) ({active} active(s))",
+  "drops_progress_in_progress": "En cours",
+  "drops_progress_claimed": "Réclamés",
+  "btn_refresh_progress": "Actualiser la progression",
+  "drops_completed_campaigns": "Campagnes terminées"
 }
