@@ -21,6 +21,10 @@ from PIL import Image, ImageTk
 # --- Selenium avec undetected-chromedriver
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+
 
 def _resolve_app_dir():
     """Directory that contains bundled resources/assets."""
@@ -305,6 +309,89 @@ def kick_is_live_by_api(url: str) -> bool:
     except Exception:
         return True
 
+def _find_reward_cards(driver):
+    """Retourne la liste des cartes de drops dans /drops/inventory."""
+    return driver.find_elements(
+        By.XPATH,
+        "//li[.//img[contains(@src, 'drops/reward-image')]"
+        "     and .//span[@class and contains(@class,'font-semibold')]]"
+    )
+
+
+def _parse_reward_card(card):
+    """Extrait les infos utiles d'une carte de drop."""
+    # Titre
+    title_el = card.find_element(
+        By.XPATH,
+        ".//span[@class and contains(@class,'font-semibold')]"
+    )
+    title = title_el.text.strip()
+
+    # Barre de progression
+    progress_ratio = None
+    progress_text = None
+    try:
+        pb = card.find_element(By.XPATH, ".//div[@role='progressbar']")
+        val_now = pb.get_attribute("aria-valuenow")
+        val_text = pb.get_attribute("aria-valuetext")
+        if val_now:
+            try:
+                progress_ratio = float(val_now)
+            except ValueError:
+                progress_ratio = None
+        if val_text:
+            progress_text = val_text.strip()
+    except Exception:
+        pass
+
+    # Bloc bas (bouton ou texte)
+    bottom_div = card.find_element(
+        By.XPATH,
+        ".//div[contains(@class,'flex') and contains(@class,'flex-col') "
+        "       and contains(@class,'h-10')]"
+    )
+
+    has_claim_button = False
+    raw_status_text = ""
+
+    try:
+        btn = bottom_div.find_element(
+            By.XPATH,
+            ".//button[contains(., 'Réclamer') or contains(., 'Claim')]"
+        )
+        if btn.is_displayed():
+            has_claim_button = True
+            raw_status_text = btn.text.strip()
+    except Exception:
+        has_claim_button = False
+
+    if not has_claim_button:
+        try:
+            span = bottom_div.find_element(By.XPATH, ".//span")
+            raw_status_text = span.text.strip()
+        except Exception:
+            raw_status_text = ""
+
+    txt_lower = raw_status_text.lower()
+
+    if has_claim_button:
+        status = "ready_to_claim"
+    elif "réclamé" in txt_lower or "reclamé" in txt_lower or "claimed" in txt_lower:
+        status = "claimed"
+    elif "%" in raw_status_text:
+        status = "in_progress"
+    else:
+        status = "unknown"
+
+    return {
+        "title": title,
+        "status": status,
+        "raw_status_text": raw_status_text,
+        "progress_ratio": progress_ratio,
+        "progress_text": progress_text,
+    }
+
+
 def get_drop_info(driver, drop_title: str):
 
     if driver is None:
@@ -315,7 +402,7 @@ def get_drop_info(driver, drop_title: str):
         print("[INVENTORY] no drop_title given, abort")
         return None
 
-    print(f"[INVENTORY] checking '{drop_title}'")
+    print(f"[INVENTORY] checking '{drop_title}' (DOM mode)")
 
     current_handle = None
     existing_handles = []
@@ -328,7 +415,7 @@ def get_drop_info(driver, drop_title: str):
         driver.execute_script(
             "window.open('https://kick.com/drops/inventory', '_blank');"
         )
-        time.sleep(3)
+        time.sleep(1)
 
         # Trouver le nouvel onglet
         new_handles = driver.window_handles
@@ -345,79 +432,99 @@ def get_drop_info(driver, drop_title: str):
             return None
 
         driver.switch_to.window(inv_handle)
-        time.sleep(5)
 
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        lines = body_text.splitlines()
+        # Attendre que les cartes de drops soient présentes (DOM)
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//li[.//img[contains(@src, 'drops/reward-image')]]")
+                )
+            )
+        except TimeoutException:
+            print("[INVENTORY] Timeout waiting for drop cards on inventory page")
+            # on essaie quand même de lire ce qu'on trouve
+            pass
 
-        idx = None
-        for i, line in enumerate(lines):
-            if drop_title.lower() in line.lower():
-                idx = i
+        cards = _find_reward_cards(driver)
+        if not cards:
+            print("[INVENTORY] no reward cards found in DOM")
+        
+        # Chercher la carte dont le titre contient drop_title
+        matched_info = None
+        for c in cards:
+            info = _parse_reward_card(c)
+            if drop_title.lower() in info["title"].lower():
+                matched_info = info
                 break
 
-        info = {}
+        if not matched_info:
+            print("[INVENTORY] drop title not found in cards")
+            result = {
+                "status": "not_found",
+                "raw_status_text": "Drop introuvable dans l'inventaire",
+                "friendly_status": "",
+            }
+        else:
+            # Construire friendly_status style "99% de 2h"
+            text_for_regex = " ".join(
+                t for t in [
+                    matched_info.get("raw_status_text") or "",
+                    matched_info.get("progress_text") or "",
+                ] if t
+            )
 
-        if idx is not None:
-            # On prend quelques lignes autour pour analyser
-            window_lines = lines[max(0, idx - 3): idx + 6]
-            window_text = "\n".join(window_lines)
-            lt = window_text.lower()
+            pct = None
+            # 1) Essayer de récupérer le % dans le texte
+            m_pct = re.search(r"(\d+)\s*%", text_for_regex)
+            if m_pct:
+                try:
+                    pct = int(m_pct.group(1))
+                except ValueError:
+                    pct = None
+            # 2) Sinon utiliser progress_ratio (aria-valuenow)
+            if pct is None and matched_info.get("progress_ratio") is not None:
+                try:
+                    pct = int(round(float(matched_info["progress_ratio"])))
+                except Exception:
+                    pct = None
 
-            print("[INVENTORY] local window text around drop:")
-            print(window_text)
-            print("-" * 60)
-
-            status = "unknown"
-            if "claimed" in lt or "réclamé" in lt:
-                status = "claimed"
-            elif "ready to claim" in lt or "prêt à réclamer" in lt:
-                status = "ready_to_claim"
-            elif "%" in lt:
-                status = "in_progress"
-
-            info["status"] = status
-            info["raw_status_text"] = window_text.replace("\n", " ")
-
-            # --- friendly_status style "99% de 2h" ---
-            import re
-            friendly = ""
-
-            # pourcentage
-            m_pct = re.search(r"(\d+)\s*%", window_text)
-            # durée, par ex "2h", "2 h", "2h 30m", "2 h 30 min", etc.
+            # Durée type "2h" / "2 h 30 min"
             m_time = re.search(
                 r"(\d+\s*h(?:\s*\d+\s*(?:m|min))?)",
-                window_text,
+                text_for_regex,
                 re.IGNORECASE,
             )
 
-            if m_pct and m_time:
-                friendly = f"{m_pct.group(1)}% de {m_time.group(1)}"
-            elif m_pct:
-                friendly = f"{m_pct.group(1)}%"
-            elif status in ("claimed", "ready_to_claim"):
-                friendly = status
+            friendly = ""
+            if pct is not None and m_time:
+                friendly = f"{pct}% de {m_time.group(1)}"
+            elif pct is not None:
+                friendly = f"{pct}%"
+            elif matched_info["status"] in ("claimed", "ready_to_claim"):
+                friendly = matched_info["status"]
 
-            info["friendly_status"] = friendly
+            result = {
+                "status": matched_info["status"],
+                "raw_status_text": text_for_regex.strip()
+                    or matched_info.get("raw_status_text", ""),
+                "friendly_status": friendly or "",
+            }
 
             if friendly:
                 print(f"[INVENTORY] parsed friendly_status = '{friendly}'")
             else:
-                print("[INVENTORY] could not parse friendly_status from text.")
+                print("[INVENTORY] could not parse friendly_status from DOM text.")
 
-        else:
-            print("[INVENTORY] drop title not found in inventory text.")
-            info["status"] = "not_found"
-            info["raw_status_text"] = "Drop introuvable dans l'inventaire"
-            info["friendly_status"] = ""
+        # Fermer l'onglet inventaire et revenir sur le stream
+        try:
+            driver.close()
+        except Exception:
+            pass
 
-        # Ferme l'onglet inventaire et revient sur le stream
-        driver.close()
         if current_handle in driver.window_handles:
             driver.switch_to.window(current_handle)
 
-        return info
+        return result
 
     except Exception as e:
         print("[INVENTORY] error:", e)
@@ -427,8 +534,6 @@ def get_drop_info(driver, drop_title: str):
         except Exception:
             pass
         return None
-
-
 
 
 def is_drop_really_acquired(info):
