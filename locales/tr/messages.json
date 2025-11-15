@@ -70,5 +70,15 @@
   "drops_added": "Eklendi: {channel}",
   "drops_watch_minutes": "İzlenecek dakika:",
   "warning": "Uyarı",
-  "cannot_edit_active_stream": "Aktif bir akışın süresini düzenleyemezsiniz. Lütfen önce durdurun."
+  "cannot_edit_active_stream": "Aktif bir akışın süresini düzenleyemezsiniz. Lütfen önce durdurun.",
+  "drops_tab_campaigns": "Kampanyalar",
+  "drops_tab_progress": "İlerlemem",
+  "drops_progress_loading": "İlerleme yükleniyor...",
+  "drops_progress_error": "İlerleme yüklenirken hata",
+  "drops_progress_no_data": "İlerleme verisi yok",
+  "drops_progress_loaded": "{total} kampanya yüklendi ({active} aktif)",
+  "drops_progress_in_progress": "Devam Ediyor",
+  "drops_progress_claimed": "Alındı",
+  "btn_refresh_progress": "İlerlemeyi Yenile",
+  "drops_completed_campaigns": "Tamamlanan Kampanyalar"
 }
