@@ -830,7 +830,8 @@ class StreamWorker(threading.Thread):
         hide_player=False,
         mute=True,
         mini_player=False,
-        drop_title="",    
+        drop_title="",
+        shared_driver=None,   
     ):
         super().__init__(daemon=True)
         self.url = url
@@ -839,7 +840,8 @@ class StreamWorker(threading.Thread):
         self.on_finish = on_finish
         self.stop_event = stop_event or threading.Event()
         self.elapsed_seconds = 0
-        self.driver = None
+        self.driver = shared_driver
+        self.use_shared = shared_driver is not None
         self.driver_path = driver_path
         self.extension_path = extension_path
         self.hide_player = hide_player
@@ -859,28 +861,29 @@ class StreamWorker(threading.Thread):
     def run(self):
         domain = domain_from_url(self.url)
         try:
-            # If loading a .crx, Chrome cannot be headless
-            use_headless = bool(self.hide_player)
-            # If mini_player enabled, force visible to show the small window
-            if self.mini_player:
-                use_headless = False
-            # If hide_player enabled, force headless to hide the entire window (unless mini_player has priority)
-            if self.extension_path and self.extension_path.endswith(".crx"):
-                use_headless = False
+            if not self.driver: 
+                # If loading a .crx, Chrome cannot be headless
+                use_headless = bool(self.hide_player)
+                # If mini_player enabled, force visible to show the small window
+                if self.mini_player:
+                    use_headless = False
+                # If hide_player enabled, force headless to hide the entire window (unless mini_player has priority)
+                if self.extension_path and self.extension_path.endswith(".crx"):
+                    use_headless = False
 
-            self.driver = make_chrome_driver(
-                headless=use_headless,
-                driver_path=self.driver_path,
-                extension_path=self.extension_path,
-                profile_name="chrome_streams",
-            )
+                self.driver = make_chrome_driver(
+                    headless=use_headless,
+                    driver_path=self.driver_path,
+                    extension_path=self.extension_path,
+                    profile_name="chrome_streams",
+                )
 
-            if not use_headless and self.mini_player:
-                try:
-                    self.driver.set_window_size(360, 360)
-                    self.driver.set_window_position(20, 20)
-                except Exception:
-                    pass
+                if not use_headless and self.mini_player:
+                    try:
+                        self.driver.set_window_size(360, 360)
+                        self.driver.set_window_position(20, 20)
+                    except Exception:
+                        pass
 
             base = f"https://{domain}" if domain else "about:blank"
             if domain:
@@ -933,16 +936,8 @@ class StreamWorker(threading.Thread):
         except Exception as e:
             print("StreamWorker error:", e)
         finally:
-            try:
-                if self.driver:
-                    self.driver.quit()
-            except Exception:
-                pass
-            try:
-                if self.on_finish:
+            if self.on_finish:
                     self.on_finish(self.elapsed_seconds, self.completed)
-            except Exception:
-                pass
 
     def stop(self):
         self.stop_event.set()
@@ -1086,6 +1081,7 @@ class App(ctk.CTk):
         self._interactive_driver = None  # Chrome pour capture de cookies
         self.queue_running = False
         self.queue_current_idx = None
+        self.shared_driver = None 
 
         # Helper traduction
         def _t(key: str, **kwargs):
@@ -1408,6 +1404,13 @@ class App(ctk.CTk):
                 if ctk.get_appearance_mode() == "Dark"
                 else "#e6f7e8",
             )
+            self.tree.tag_configure(
+                "drop_done",
+                background="#22352a"
+                if ctk.get_appearance_mode() == "Dark"
+                else "#d1fae5",
+            )
+
         except Exception:
             pass
 
@@ -1623,6 +1626,38 @@ class App(ctk.CTk):
                     self.obtain_cookies_interactively(item["url"], domain)
 
         stop_event = threading.Event()
+                # --- Driver partagé pour toute la file ---
+        if self.shared_driver is None:
+            use_headless = bool(self.hide_player_var.get())
+            if self.mini_player_var.get():
+                use_headless = False
+            if self.config_data.extension_path and self.config_data.extension_path.endswith(".crx"):
+                use_headless = False
+
+            self.shared_driver = make_chrome_driver(
+                headless=use_headless,
+                driver_path=self.config_data.chromedriver_path,
+                extension_path=self.config_data.extension_path,
+                profile_name="chrome_streams",
+            )
+
+            # Mini player : taille / position
+            if not use_headless and self.mini_player_var.get():
+                try:
+                    self.shared_driver.set_window_size(360, 360)
+                    self.shared_driver.set_window_position(20, 20)
+                except Exception:
+                    pass
+
+            # Charger les cookies une première fois
+            if domain:
+                base = f"https://{domain}"
+                try:
+                    self.shared_driver.get(base)
+                    CookieManager.load_cookies(self.shared_driver, domain)
+                except Exception:
+                    pass
+
         worker = StreamWorker(
             item["url"],
             item["minutes"],
@@ -1635,6 +1670,7 @@ class App(ctk.CTk):
             mute=bool(self.mute_var.get()),
             mini_player=bool(self.mini_player_var.get()),
             drop_title=item.get("drop_title", ""),
+            shared_driver=self.shared_driver,
         )
         self.workers[idx] = worker
         worker.start()
@@ -1725,6 +1761,17 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+        # Fermeture driver partagé
+        try:
+            if self.shared_driver:
+                try:
+                    self.shared_driver.quit()
+                except Exception:
+                    pass
+                self.shared_driver = None
+        except Exception:
+            pass
+        
         # Stop and close all Selenium drivers from workers
         for idx, w in list(self.workers.items()):
             try:
@@ -2314,9 +2361,10 @@ class App(ctk.CTk):
                                             label.configure(text=f"📺 {username}")
                                     else:
                                         # Add all
+                                        default_minutes = self._get_default_minutes_for_campaign(c)
                                         for ch in c["channels"]:
                                             if not self._is_channel_in_list(ch['url']):
-                                                self._add_drop_channel(ch['url'])
+                                                self._add_drop_channel(ch['url'], minutes=default_minutes, drop_title=c["name"])
                                         # Update bulk button
                                         bulk_btn.configure(
                                             text=f"✨ {translate(self.config_data.language, 'btn_remove_all_channels')}",
@@ -2349,7 +2397,8 @@ class App(ctk.CTk):
                                             label.configure(text=f"📺 {username}")
                                         else:
                                             # Add
-                                            self._add_drop_channel(url)
+                                            default_minutes = self._get_default_minutes_for_campaign(c)
+                                            self._add_drop_channel(url, minutes=default_minutes, drop_title=c["name"])
                                             btn.configure(
                                                 text="✗ Remove",
                                                 fg_color=("#ef4444", "#dc2626"),
@@ -2404,15 +2453,24 @@ class App(ctk.CTk):
                 return idx
         return None
 
-    def _add_drop_channel(self, url, minutes=120):
+    def _add_drop_channel(self, url, minutes=120, drop_title=""):
         """Add a drop channel to the queue"""
         try:
-            self.config_data.add(url, minutes)
+            self.config_data.add(url, minutes, drop_title=drop_title or "")
             self.refresh_list()
             self.status_var.set(self.t("drops_added", channel=url.split("/")[-1]))
         except Exception as e:
             print(f"Error adding channel: {e}")
     
+    def _get_default_minutes_for_campaign(self, campaign):
+        rewards = campaign.get("rewards") or []
+        best = 0
+        for r in rewards:
+            units = r.get("required_units")
+            if isinstance(units, (int, float)) and units > best:
+                best = int(units)
+        return best or 120
+
     def _remove_drop_channel(self, url):
         """Remove a channel from the queue"""
         try:
@@ -2436,9 +2494,14 @@ class App(ctk.CTk):
     def _add_all_campaign_channels(self, campaign):
         """Add all channels from a campaign"""
         count = 0
+        default_minutes = self._get_default_minutes_for_campaign(campaign)
         for channel in campaign["channels"]:
             try:
-                self.config_data.add(channel["url"], 120)  # 120 minutes by default
+                self.config_data.add(
+                    channel["url"],
+                    default_minutes,
+                    drop_title=campaign["name"]
+                )
                 count += 1
             except Exception as e:
                 print(f"Error adding channel {channel['username']}: {e}")
@@ -2571,6 +2634,20 @@ class App(ctk.CTk):
                     current_tags.discard("paused")
                 else:
                     current_tags.add("paused")
+                # --- NEW: tag vert pour drop terminé ---
+                done_drop = False
+                w = self.workers.get(idx)
+                if w is not None:
+                    info = getattr(w, "drop_info", None)
+                    if info:
+                        st = (info.get("status") or "").lower()
+                        if st in ("ready_to_claim", "claimed"):
+                            done_drop = True
+
+                if done_drop:
+                    current_tags.add("drop_done")
+                else:
+                    current_tags.discard("drop_done")
                 self.tree.item(str(idx), tags=tuple(current_tags))
 
             # Update status bar with elapsed tim
