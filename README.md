@@ -46,8 +46,10 @@ Kick Drop Miner automates watching Kick.com streams so you can keep drop timers 
    ```
 2. Install dependencies
    ```powershell
-   pip install customtkinter pillow selenium webdriver-manager undetected-chromedriver
+   pip install customtkinter pillow selenium webdriver-manager undetected-chromedriver setuptools
+   pip install setuptools # required if you are above python version 3.10+
    pip install browser_cookie3  # optional but handy
+
    ```
 3. Launch
    ```powershell
