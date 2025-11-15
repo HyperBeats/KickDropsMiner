@@ -5,6 +5,7 @@
   "mute": false,
   "hide_player": false,
   "mini_player": false,
-  "dark_mode": true,
+  "force_160p": false,
+  "dark_mode": false,
   "language": "en"
 }
