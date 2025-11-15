@@ -12,7 +12,7 @@ import random
 from io import BytesIO
 import base64
 import re
-from kick_inventory import get_drop_info, is_drop_really_acquired
+
 
 # --- UI moderne
 import customtkinter as ctk
@@ -305,6 +305,143 @@ def kick_is_live_by_api(url: str) -> bool:
     except Exception:
         return True
 
+def get_drop_info(driver, drop_title: str):
+
+    if driver is None:
+        print("[INVENTORY] driver is None, abort")
+        return None
+
+    if not drop_title:
+        print("[INVENTORY] no drop_title given, abort")
+        return None
+
+    print(f"[INVENTORY] checking '{drop_title}'")
+
+    current_handle = None
+    existing_handles = []
+
+    try:
+        current_handle = driver.current_window_handle
+        existing_handles = driver.window_handles[:]
+
+        # Ouvre un NOUVEL onglet pour l'inventaire
+        driver.execute_script(
+            "window.open('https://kick.com/drops/inventory', '_blank');"
+        )
+        time.sleep(3)
+
+        # Trouver le nouvel onglet
+        new_handles = driver.window_handles
+        inv_handle = None
+        for h in new_handles:
+            if h not in existing_handles:
+                inv_handle = h
+                break
+        if inv_handle is None and new_handles:
+            inv_handle = new_handles[-1]
+
+        if not inv_handle:
+            print("[INVENTORY] no new tab handle found")
+            return None
+
+        driver.switch_to.window(inv_handle)
+        time.sleep(5)
+
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        lines = body_text.splitlines()
+
+        idx = None
+        for i, line in enumerate(lines):
+            if drop_title.lower() in line.lower():
+                idx = i
+                break
+
+        info = {}
+
+        if idx is not None:
+            # On prend quelques lignes autour pour analyser
+            window_lines = lines[max(0, idx - 3): idx + 6]
+            window_text = "\n".join(window_lines)
+            lt = window_text.lower()
+
+            print("[INVENTORY] local window text around drop:")
+            print(window_text)
+            print("-" * 60)
+
+            status = "unknown"
+            if "claimed" in lt or "réclamé" in lt:
+                status = "claimed"
+            elif "ready to claim" in lt or "prêt à réclamer" in lt:
+                status = "ready_to_claim"
+            elif "%" in lt:
+                status = "in_progress"
+
+            info["status"] = status
+            info["raw_status_text"] = window_text.replace("\n", " ")
+
+            # --- friendly_status style "99% de 2h" ---
+            import re
+            friendly = ""
+
+            # pourcentage
+            m_pct = re.search(r"(\d+)\s*%", window_text)
+            # durée, par ex "2h", "2 h", "2h 30m", "2 h 30 min", etc.
+            m_time = re.search(
+                r"(\d+\s*h(?:\s*\d+\s*(?:m|min))?)",
+                window_text,
+                re.IGNORECASE,
+            )
+
+            if m_pct and m_time:
+                friendly = f"{m_pct.group(1)}% de {m_time.group(1)}"
+            elif m_pct:
+                friendly = f"{m_pct.group(1)}%"
+            elif status in ("claimed", "ready_to_claim"):
+                friendly = status
+
+            info["friendly_status"] = friendly
+
+            if friendly:
+                print(f"[INVENTORY] parsed friendly_status = '{friendly}'")
+            else:
+                print("[INVENTORY] could not parse friendly_status from text.")
+
+        else:
+            print("[INVENTORY] drop title not found in inventory text.")
+            info["status"] = "not_found"
+            info["raw_status_text"] = "Drop introuvable dans l'inventaire"
+            info["friendly_status"] = ""
+
+        # Ferme l'onglet inventaire et revient sur le stream
+        driver.close()
+        if current_handle in driver.window_handles:
+            driver.switch_to.window(current_handle)
+
+        return info
+
+    except Exception as e:
+        print("[INVENTORY] error:", e)
+        try:
+            if current_handle and current_handle in driver.window_handles:
+                driver.switch_to.window(current_handle)
+        except Exception:
+            pass
+        return None
+
+
+
+
+def is_drop_really_acquired(info):
+    """
+    Utilitaire pour savoir si un drop est réellement acquis,
+    au cas où on passe un dict avec une clé 'status'.
+    """
+    if not info:
+        return False
+    status = (info.get("status") or "").lower()
+    return status in ("ready_to_claim", "claimed")
+
+
 
 def fetch_drop_campaigns():
     """Fetches active drop campaigns from the Kick API.
@@ -320,7 +457,7 @@ def fetch_drop_campaigns():
         # (headless is detected by Kick, so we use a real window but hidden)
         # Note: StreamWorkers use their own user-configured parameters
         driver = make_chrome_driver(
-            headless=False, visible_width=400, visible_height=300
+            headless=False, visible_width=400, visible_height=300, profile_name="chrome_campaigns", 
         )
 
         # Position the window off-screen to make it invisible
@@ -529,6 +666,7 @@ def make_chrome_driver(
     visible_height=800,
     driver_path=None,
     extension_path=None,
+    profile_name="chrome_data",   # <--- nouveau paramètre
 ):
     opts = uc.ChromeOptions()  # Use undetected-chromedriver options
 
@@ -545,12 +683,11 @@ def make_chrome_driver(
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-blink-features=AutomationControlled")
-    # Remove redundant experimental options to avoid parsing error
-    # (undetected-chromedriver already handles this natively)
     opts.add_argument("--log-level=3")
     opts.add_argument("--silent")
 
-    user_data_dir = CHROME_DATA_DIR
+    # >>> profil séparé selon profile_name
+    user_data_dir = os.path.join(DATA_DIR, profile_name)
     os.makedirs(user_data_dir, exist_ok=True)
     opts.add_argument(f"--user-data-dir={user_data_dir}")
 
@@ -564,13 +701,12 @@ def make_chrome_driver(
         except Exception:
             pass
 
-    # Create driver with undetected-chromedriver
-    # (driver_path no longer needed, uc handles automatic download)
     driver = uc.Chrome(
-        options=opts, version_main=None
-    )  # version_main=None for latest version
-
+        options=opts,
+        version_main=0,   # évite le message "could not detect version_main..."
+    )
     return driver
+
 
 
 # ===============================
@@ -631,6 +767,7 @@ class StreamWorker(threading.Thread):
                 headless=use_headless,
                 driver_path=self.driver_path,
                 extension_path=self.extension_path,
+                profile_name="chrome_streams",
             )
 
             if not use_headless and self.mini_player:
@@ -676,11 +813,10 @@ class StreamWorker(threading.Thread):
                 if self.drop_title and now - self._last_inventory_check >= self._inventory_check_interval:
                     self._last_inventory_check = now
                     try:
-                        info = get_drop_info(self.drop_title, domain=domain)
+                        info = get_drop_info(self.driver, self.drop_title)
                         self.drop_info = info
                         if info:
                             status = (info.get("status") or "").lower()
-                            # On considère que "ready_to_claim" ou "claimed" = drop terminé
                             if status in ("ready_to_claim", "claimed"):
                                 print(f"[WORKER] Drop '{self.drop_title}' status={status} -> stop worker.")
                                 self.completed = True
@@ -1272,9 +1408,15 @@ class App(ctk.CTk):
             drop_title = item.get("drop_title", "") or ""
             drop_state = ""
             if i in self.workers:
-                info = getattr(self.workers[i], "drop_info", None)
+                worker = self.workers[i]
+                info = getattr(worker, "drop_info", None)
                 if info:
-                    drop_state = info.get("raw_status_text") or info.get("status", "")
+                    drop_state = (
+                        info.get("friendly_status")
+                        or info.get("raw_status_text")
+                        or info.get("status", "")
+                    )
+
             if drop_title or drop_state:
                 drop_text = drop_title if not drop_state else f"{drop_title} ({drop_state})"
             else:
@@ -1437,6 +1579,7 @@ class App(ctk.CTk):
                 headless=False,
                 driver_path=self.config_data.chromedriver_path,
                 extension_path=self.config_data.extension_path,
+                profile_name="chrome_cookies", 
             )
             self._interactive_driver = drv
         except Exception as e:
@@ -2304,7 +2447,11 @@ class App(ctk.CTk):
                 if w is not None:
                     info = getattr(w, "drop_info", None)
                     if info:
-                        drop_state = info.get("raw_status_text") or info.get("status", "")
+                        drop_state = (
+                            info.get("friendly_status")
+                            or info.get("raw_status_text")
+                            or info.get("status", "")
+                        )
 
                 if drop_title or drop_state:
                     drop_text = drop_title if not drop_state else f"{drop_title} ({drop_state})"
@@ -2321,7 +2468,7 @@ class App(ctk.CTk):
                     current_tags.add("paused")
                 self.tree.item(str(idx), tags=tuple(current_tags))
 
-            # Mise à jour barre de statut (comme tu l’avais déjà)
+            # Update status bar with elapsed tim
             if idx < len(self.config_data.items):
                 item = self.config_data.items[idx]
                 minutes = seconds // 60

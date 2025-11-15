@@ -1,6 +1,6 @@
 # Ignore lo*cal app data
 cookies/*
-chrome_data/*
+chrome_*
 config.json*
 config.json
 __pycache__/
@@ -9,3 +9,4 @@ build/
 *.spec
 example_response.json
 /useful data
+.venv/
