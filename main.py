@@ -106,6 +106,7 @@ BUILTIN_TRANSLATIONS = {
         "switch_mute": "Muet",
         "switch_hide": "Masquer le lecteur",
         "switch_mini": "Mini-lecteur",
+        "switch_force_160p": "Forcer 160p",
         "label_theme": "Thème",
         "theme_dark": "Sombre",
         "theme_light": "Clair",
@@ -190,6 +191,7 @@ BUILTIN_TRANSLATIONS = {
         "switch_mute": "Mute",
         "switch_hide": "Hide player",
         "switch_mini": "Mini player",
+        "switch_force_160p": "Force 160p",
         "label_theme": "Theme",
         "theme_dark": "Dark",
         "theme_light": "Light",
@@ -886,6 +888,7 @@ class StreamWorker(threading.Thread):
         hide_player=False,
         mute=True,
         mini_player=False,
+        force_160p=False,
     ):
         super().__init__(daemon=True)
         self.url = url
@@ -900,6 +903,7 @@ class StreamWorker(threading.Thread):
         self.hide_player = hide_player
         self.mute = mute
         self.mini_player = mini_player
+        self.force_160p = force_160p
         self.completed = False
         # Anti rate-limit: cache "is live" checks
         self._last_live_check = 0.0
@@ -935,6 +939,14 @@ class StreamWorker(threading.Thread):
             if domain:
                 self.driver.get(base)
                 CookieManager.load_cookies(self.driver, domain)
+                
+                # Set stream quality in session storage BEFORE navigating to stream URL
+                if self.force_160p:
+                    try:
+                        self.driver.execute_script("sessionStorage.setItem('stream_quality', '160');")
+                    except Exception as e:
+                        print(f"Error setting stream_quality: {e}")
+            
             self.driver.get(self.url)
 
             try:
@@ -1057,6 +1069,7 @@ class Config:
         self.mute = True
         self.hide_player = False
         self.mini_player = False
+        self.force_160p = False
         self.dark_mode = True  # Dark by default
         self.language = "fr"  # fr or en
         self.load()
@@ -1071,6 +1084,7 @@ class Config:
             self.mute = data.get("mute", True)
             self.hide_player = data.get("hide_player", False)
             self.mini_player = data.get("mini_player", False)
+            self.force_160p = data.get("force_160p", False)
             self.dark_mode = data.get("dark_mode", True)
             self.language = data.get("language", "fr")
         else:
@@ -1084,6 +1098,7 @@ class Config:
             "mute": self.mute,
             "hide_player": self.hide_player,
             "mini_player": self.mini_player,
+            "force_160p": self.force_160p,
             "dark_mode": self.dark_mode,
             "language": self.language,
         }
@@ -1256,6 +1271,7 @@ class App(ctk.CTk):
         self.mute_var = tk.BooleanVar(value=bool(self.config_data.mute))
         self.hide_player_var = tk.BooleanVar(value=bool(self.config_data.hide_player))
         self.mini_player_var = tk.BooleanVar(value=bool(self.config_data.mini_player))
+        self.force_160p_var = tk.BooleanVar(value=bool(self.config_data.force_160p))
 
         sw_mute = ctk.CTkSwitch(
             self.sidebar,
@@ -1281,6 +1297,14 @@ class App(ctk.CTk):
         )
         sw_mini.grid(row=11, column=0, padx=14, pady=6, sticky="w")
 
+        sw_force_160p = ctk.CTkSwitch(
+            self.sidebar,
+            text=self.t("switch_force_160p"),
+            command=self.on_toggle_force_160p,
+            variable=self.force_160p_var,
+        )
+        sw_force_160p.grid(row=12, column=0, padx=14, pady=6, sticky="w")
+
         # Thème
         self.theme_var = tk.StringVar(
             value=self.t("theme_dark")
@@ -1288,7 +1312,7 @@ class App(ctk.CTk):
             else self.t("theme_light")
         )
         theme_label = ctk.CTkLabel(self.sidebar, text=self.t("label_theme"))
-        theme_label.grid(row=12, column=0, padx=14, pady=(18, 4), sticky="w")
+        theme_label.grid(row=13, column=0, padx=14, pady=(18, 4), sticky="w")
         theme_menu = ctk.CTkOptionMenu(
             self.sidebar,
             values=[self.t("theme_dark"), self.t("theme_light")],
@@ -1296,7 +1320,7 @@ class App(ctk.CTk):
             variable=self.theme_var,
             width=180,
         )
-        theme_menu.grid(row=13, column=0, padx=14, pady=(0, 14), sticky="w")
+        theme_menu.grid(row=14, column=0, padx=14, pady=(0, 14), sticky="w")
 
         # Language (only FR/EN in dropdown for now)
         self.lang_var = tk.StringVar(
@@ -1305,7 +1329,7 @@ class App(ctk.CTk):
             else self.t("language_en")
         )
         lang_label = ctk.CTkLabel(self.sidebar, text=self.t("label_language"))
-        lang_label.grid(row=14, column=0, padx=14, pady=(4, 4), sticky="w")
+        lang_label.grid(row=15, column=0, padx=14, pady=(4, 4), sticky="w")
         lang_menu = ctk.CTkOptionMenu(
             self.sidebar,
             values=[self.t("language_fr"), self.t("language_en")],
@@ -1313,7 +1337,7 @@ class App(ctk.CTk):
             variable=self.lang_var,
             width=180,
         )
-        lang_menu.grid(row=15, column=0, padx=14, pady=(0, 14), sticky="w")
+        lang_menu.grid(row=16, column=0, padx=14, pady=(0, 14), sticky="w")
 
     def _build_content(self):
         header = ctk.CTkFrame(self.content, corner_radius=12)
@@ -1629,6 +1653,7 @@ class App(ctk.CTk):
             hide_player=bool(self.hide_player_var.get()),
             mute=bool(self.mute_var.get()),
             mini_player=bool(self.mini_player_var.get()),
+            force_160p=bool(self.config_data.force_160p),
         )
         self.workers[idx] = worker
         worker.start()
@@ -2934,6 +2959,12 @@ class App(ctk.CTk):
                 w.ensure_player_state()
             except Exception:
                 pass
+
+    def on_toggle_force_160p(self):
+        self.config_data.force_160p = bool(self.force_160p_var.get())
+        self.config_data.save()
+        # Note: force_160p only affects new streams (set during initialization)
+        # Existing streams will need to be restarted to apply the change
 
     # ----------- Callbacks Worker -----------
     def on_worker_update(self, idx, seconds, live):
