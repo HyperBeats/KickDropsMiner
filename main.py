@@ -1363,10 +1363,10 @@ class App(ctk.CTk):
         self.tree.heading("elapsed", text=self.t("col_elapsed"))
         self.tree.heading("drop", text="Drop")
 
-        self.tree.column("url", width=500, anchor="w")
-        self.tree.column("minutes", width=130, anchor="center")
-        self.tree.column("elapsed", width=140, anchor="center")
-        self.tree.column("drop", width=220, anchor="w")
+        self.tree.column("url", width=300, minwidth=250, anchor="w", stretch=True)
+        self.tree.column("minutes", width=100, minwidth=70, anchor="center", stretch=False)
+        self.tree.column("elapsed", width=100, minwidth=90, anchor="center", stretch=False)
+        self.tree.column("drop", width=200, minwidth=200, anchor="w", stretch=False)
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
