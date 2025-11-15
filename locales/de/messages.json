@@ -21,6 +21,7 @@
   "language_fr": "Französisch",
   "language_de": "Deutsch",
   "language_tr": "Türkisch",
+  "language_ru": "Russisch",
   "prompt_live_url_title": "Live-URL",
   "prompt_live_url_msg": "Gib die Kick-Live-URL ein:",
   "prompt_minutes_title": "Ziel (Minuten)",
@@ -71,5 +72,15 @@
   "drops_added": "Hinzugefügt: {channel}",
   "drops_watch_minutes": "Minuten zum Schauen:",
   "warning": "Warnung",
-  "cannot_edit_active_stream": "Die Dauer eines aktiven Streams kann nicht bearbeitet werden. Bitte zuerst stoppen."
+  "cannot_edit_active_stream": "Die Dauer eines aktiven Streams kann nicht bearbeitet werden. Bitte zuerst stoppen.",
+  "drops_tab_campaigns": "Kampagnen",
+  "drops_tab_progress": "Mein Fortschrit",
+  "drops_progress_loading": "Fortschrit Läd...",
+  "drops_progress_error": "Fehler beim Laden des Fortschrits",
+  "drops_progress_no_data": "Keine Fortschrit daten verfügbar",
+  "drops_progress_loaded": "{total} geladen, Kampagnen ({active} aktive)",
+  "drops_progress_in_progress": "In Fortschrit",
+  "drops_progress_claimed": "Beanschprucht",
+  "btn_refresh_progress": "Aktualisiere Fortschrit",
+  "drops_completed_campaigns": "Fertige Kampagnen"
 }
