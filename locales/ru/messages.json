@@ -22,6 +22,7 @@
   "language_tr": "Türkçe",
   "language_ru": "Русский",
   "language_de": "Deutsch",
+  "language_pl":"Polski",
   "prompt_live_url_title": "URL-адрес на трансляцию",
   "prompt_live_url_msg": "Вставьте URL-адрес на трансляцию Kick:",
   "prompt_minutes_title": "Цель (минуты)",
@@ -72,5 +73,15 @@
   "drops_added": "Добавлено: {channel}",
   "drops_watch_minutes": "Минут для просмотра:",
   "warning": "Предупреждение",
-  "cannot_edit_active_stream": "Нельзя изменить длительность активного стрима. Пожалуйста, остановите его сначала."
+  "cannot_edit_active_stream": "Нельзя изменить длительность активного стрима. Пожалуйста, остановите его сначала.",
+  "drops_tab_campaigns": "Кампании",
+  "drops_tab_progress": "Мой прогресс",
+  "drops_progress_loading": "Загрузка прогресса...",
+  "drops_progress_error": "Ошибка загрузки прогресса",
+  "drops_progress_no_data": "Нет данных о прогрессе",
+  "drops_progress_loaded": "Загружено кампаний: {total} (активных: {active})",
+  "drops_progress_in_progress": "В процессе",
+  "drops_progress_claimed": "Получено",
+  "btn_refresh_progress": "Обновить прогресс",
+  "drops_completed_campaigns": "Завершённые кампании"
 }
