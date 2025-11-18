@@ -1221,6 +1221,8 @@ class App(ctk.CTk):
         if label == label_key:
             label = translate(lang_code, label_key)
         if label == label_key:
+            label = translate("en", label_key)
+        if label == label_key:
             label = lang_code
         return label
 
