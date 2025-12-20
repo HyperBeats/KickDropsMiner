@@ -334,13 +334,19 @@ def kick_is_live_by_api(url: str) -> bool:
     """Returns True if the Kick channel is live (via API).
      In case of network error, returns True to avoid blocking the queue.
     """
+    status = kick_live_status_by_api(url)
+    return True if status is None else status
+
+
+def kick_live_status_by_api(url: str):
+    """Returns True/False when known, otherwise None (network error / not Kick / invalid URL)."""
     try:
         p = urlparse(url)
         if "kick.com" not in p.netloc:
-            return True
+            return None
         username = p.path.strip("/").split("/")[0]
         if not username:
-            return True
+            return None
         api_url = f"https://kick.com/api/v2/channels/{username}"
         req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -348,7 +354,18 @@ def kick_is_live_by_api(url: str) -> bool:
         livestream = data.get("livestream")
         return bool(livestream and livestream.get("is_live"))
     except Exception:
-        return True
+        return None
+
+
+def _kick_username_from_url(url: str):
+    try:
+        p = urlparse(url)
+        if "kick.com" not in p.netloc:
+            return None
+        username = p.path.strip("/").split("/")[0]
+        return username or None
+    except Exception:
+        return None
 
 
 def fetch_drop_campaigns():
@@ -913,6 +930,7 @@ class StreamWorker(threading.Thread):
         mute=True,
         mini_player=False,
         force_160p=False,
+        offline_fresh_checks_to_switch=2,
     ):
         super().__init__(daemon=True)
         self.url = url
@@ -929,10 +947,14 @@ class StreamWorker(threading.Thread):
         self.mini_player = mini_player
         self.force_160p = force_160p
         self.completed = False
+        self.ended_because_offline = False
+        self._offline_fresh_checks = 0
+        self.offline_fresh_checks_to_switch = max(0, int(offline_fresh_checks_to_switch or 0))
         # Anti rate-limit: cache "is live" checks
         self._last_live_check = 0.0
         self._last_live_value = True
         self._live_check_interval = 30  # seconds
+        self._last_live_source = "unknown"  # api | dom | unknown
 
     def run(self):
         domain = domain_from_url(self.url)
@@ -984,11 +1006,27 @@ class StreamWorker(threading.Thread):
 
             last_report = 0
             while not self.stop_event.is_set():
+                prev_live_check = self._last_live_check
                 live = self.is_stream_live()
+                fresh_check = self._last_live_check != prev_live_check
                 try:
                     self.ensure_player_state()
                 except Exception:
                     pass
+
+                if fresh_check:
+                    if live:
+                        self._offline_fresh_checks = 0
+                    else:
+                        self._offline_fresh_checks += 1
+
+                if (
+                    not live
+                    and self.offline_fresh_checks_to_switch
+                    and self._offline_fresh_checks >= self.offline_fresh_checks_to_switch
+                ):
+                    self.ended_because_offline = True
+                    break
                 if live:
                     self.elapsed_seconds += 1
                 if time.time() - last_report >= 1:
@@ -1025,20 +1063,84 @@ class StreamWorker(threading.Thread):
         if now - self._last_live_check < self._live_check_interval:
             return self._last_live_value
         try:
-            # Combine API + fallback DOM
-            if kick_is_live_by_api(self.url):
-                self._last_live_value = True
-                return True
-            body = self.driver.find_element(By.TAG_NAME, "body").text
-            self._last_live_value = "LIVE" in body.upper()
+            # Kick is frequently protected (403 from Python). Prefer checking from inside the browser.
+            username = _kick_username_from_url(self.url)
+            if username:
+                try:
+                    api_url = f"https://kick.com/api/v2/channels/{username}"
+                    script = """
+                    const cb = arguments[arguments.length - 1];
+                    fetch(arguments[0], { credentials: 'include', cache: 'no-store', headers: { 'Accept': 'application/json' } })
+                      .then(r => r.text())
+                      .then(t => cb(t))
+                      .catch(e => cb(JSON.stringify({ error: String(e) })));
+                    """
+                    try:
+                        self.driver.set_script_timeout(10)
+                    except Exception:
+                        pass
+                    text = self.driver.execute_async_script(script, api_url)
+                    data = json.loads(text) if text else None
+                    if isinstance(data, dict) and not data.get("error"):
+                        livestream = data.get("livestream")
+                        is_live = bool(livestream and livestream.get("is_live"))
+                        self._last_live_value = is_live
+                        self._last_live_source = "browser_api"
+                        return is_live
+                except Exception:
+                    pass
+
+                # Fallback: extract app state from the page (when available) and look for is_live.
+                try:
+                    state_text = self.driver.execute_script(
+                        """
+                        try {
+                          const next = document.getElementById('__NEXT_DATA__');
+                          if (next && next.textContent) return next.textContent;
+                          if (window.__NUXT__) return JSON.stringify(window.__NUXT__);
+                        } catch (e) {}
+                        return null;
+                        """
+                    )
+                    if isinstance(state_text, str) and state_text:
+                        m = re.search(r"\"is_live\"\\s*:\\s*(true|false)", state_text, re.IGNORECASE)
+                        if m:
+                            is_live = m.group(1).lower() == "true"
+                            self._last_live_value = is_live
+                            self._last_live_source = "page_state"
+                            return is_live
+                except Exception:
+                    pass
+
+            # Last-resort DOM heuristic: only try to detect offline (avoid false positives on generic 'LIVE' text).
+            try:
+                body = self.driver.find_element(By.TAG_NAME, "body").text.upper()
+                offline_markers = (
+                    "OFFLINE",
+                    "IS OFFLINE",
+                    "CHANNEL IS OFFLINE",
+                    "NOT LIVE",
+                    "HORS LIGNE",
+                    "N'EST PAS EN DIRECT",
+                )
+                if any(m in body for m in offline_markers):
+                    self._last_live_value = False
+                    self._last_live_source = "dom_offline"
+                    return False
+            except Exception:
+                pass
+
+            self._last_live_source = "unknown"
             return self._last_live_value
         except Exception:
             self._last_live_value = False
+            self._last_live_source = "unknown"
             return False
         finally:
             # Add slight jitter to desync multiple workers
             jitter = random.uniform(-5, 5)
-            self._live_check_interval = max(10, 30 + jitter)
+            base_interval = 15 if self._last_live_value else 8
+            self._live_check_interval = max(4, base_interval + jitter)
             self._last_live_check = now
 
     def ensure_player_state(self):
@@ -3069,6 +3171,9 @@ class App(ctk.CTk):
         def ui_finish():
             if idx < 0 or idx >= len(self.config_data.items):
                 return
+
+            worker = self.workers.get(idx)
+            ended_offline = bool(worker and getattr(worker, "ended_because_offline", False))
             if completed:
                 self.config_data.items[idx]["finished"] = True
                 self.config_data.save()
@@ -3080,6 +3185,21 @@ class App(ctk.CTk):
                     current_tags.discard("paused")
                     current_tags.discard("redo")
                     self.tree.item(str(idx), values=values, tags=tuple(current_tags))
+            elif ended_offline:
+                if str(idx) in self.tree.get_children():
+                    values = list(self.tree.item(str(idx), "values"))
+                    values[2] = f"{elapsed}s ({self.t('retry')})"
+                    current_tags = set(self.tree.item(str(idx), "tags") or [])
+                    current_tags.add("redo")
+                    current_tags.discard("paused")
+                    current_tags.discard("finished")
+                    self.tree.item(str(idx), values=values, tags=tuple(current_tags))
+                try:
+                    self.status_var.set(
+                        self.t("offline_wait_retry", url=self.config_data.items[idx]["url"])
+                    )
+                except Exception:
+                    pass
 
             # Continue queue if applicable
             if getattr(self, "queue_running", False) and self.queue_current_idx == idx:
