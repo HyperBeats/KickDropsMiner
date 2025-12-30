@@ -1478,6 +1478,9 @@ class Config:
                     item["is_global_drop"] = False
                 if "cumulative_time" not in item:
                     item["cumulative_time"] = 0
+                # Add tried_channels tracking to prevent switching loops
+                if "tried_channels" not in item:
+                    item["tried_channels"] = []
             self.chromedriver_path = data.get("chromedriver_path")
             self.extension_path = data.get("extension_path")
             self.mute = data.get("mute", True)
@@ -2283,16 +2286,40 @@ class App(ctk.CTk):
         if not kick_is_live_by_api(item["url"]):
             campaign_channels = item.get("campaign_channels", [])
             if campaign_channels:
-                # Try to find a live alternative channel
+                tried_channels = item.get("tried_channels", [])
+                current_url = item["url"]
+                
+                # Add current URL to tried list if not already there
+                if current_url not in tried_channels:
+                    tried_channels.append(current_url)
+                
+                # Get all channel URLs
+                all_channel_urls = []
+                for ch in campaign_channels:
+                    ch_url = ch.get("url") if isinstance(ch, dict) else ch
+                    if ch_url:
+                        all_channel_urls.append(ch_url)
+                if current_url not in all_channel_urls:
+                    all_channel_urls.append(current_url)
+                
+                # Reset if all channels tried
+                if len(tried_channels) >= len(all_channel_urls):
+                    tried_channels.clear()
+                    debug_print(f"DEBUG: Reset tried_channels in _start_index for campaign {item.get('campaign_id')}")
+                
+                # Try to find a live alternative channel that hasn't been tried
                 for alt_channel in campaign_channels:
                     alt_url = alt_channel.get("url") if isinstance(alt_channel, dict) else alt_channel
-                    if alt_url and alt_url != item["url"]:
+                    if alt_url and alt_url != item["url"] and alt_url not in tried_channels:
                         if kick_is_live_by_api(alt_url):
                             # Switch to this alternative channel
                             self.config_data.items[idx]["url"] = alt_url
+                            tried_channels.append(alt_url)
+                            item["tried_channels"] = tried_channels
                             self.config_data.save()
                             self.refresh_list()
                             item = self.config_data.items[idx]  # Update item reference
+                            debug_print(f"DEBUG: Switched to alternative in _start_index: {alt_url} (tried: {len(tried_channels)}/{len(all_channel_urls)})")
                             break
         
         # Check again after potential channel switch
@@ -4163,6 +4190,9 @@ class App(ctk.CTk):
                     # Regular drop - mark individual item as finished
                     self.config_data.items[idx]["finished"] = True
                     self.config_data.save()
+                # Reset tried_channels on successful completion
+                self.config_data.items[idx]["tried_channels"] = []
+                self.config_data.save()
                 if str(idx) in self.tree.get_children():
                     values = list(self.tree.item(str(idx), "values"))
                     if is_global_drop:
@@ -4182,17 +4212,42 @@ class App(ctk.CTk):
                 switched = False
                 if campaign_id and campaign_channels:
                     current_url = item["url"]
-                    # Find next available live channel from same campaign
+                    tried_channels = item.get("tried_channels", [])
+                    
+                    # Add current URL to tried list if not already there
+                    if current_url not in tried_channels:
+                        tried_channels.append(current_url)
+                    
+                    # Get all channel URLs
+                    all_channel_urls = []
+                    for ch in campaign_channels:
+                        ch_url = ch.get("url") if isinstance(ch, dict) else ch
+                        if ch_url:
+                            all_channel_urls.append(ch_url)
+                    
+                    # Also include current URL in the list
+                    if current_url not in all_channel_urls:
+                        all_channel_urls.append(current_url)
+                    
+                    # If we've tried all channels, reset the tried list
+                    if len(tried_channels) >= len(all_channel_urls):
+                        tried_channels.clear()
+                        debug_print(f"DEBUG: Reset tried_channels for campaign {campaign_id} - all channels exhausted")
+                    
+                    # Find next available live channel from same campaign that hasn't been tried
                     for alt_channel in campaign_channels:
                         alt_url = alt_channel.get("url") if isinstance(alt_channel, dict) else alt_channel
-                        if alt_url and alt_url != current_url:
+                        if alt_url and alt_url != current_url and alt_url not in tried_channels:
                             # Check if this alternative is live
                             if kick_is_live_by_api(alt_url):
                                 # Switch to this alternative channel
                                 self.config_data.items[idx]["url"] = alt_url
+                                tried_channels.append(alt_url)  # Mark as tried
+                                item["tried_channels"] = tried_channels  # Update item
                                 self.config_data.save()
                                 self.refresh_list()
                                 switched = True
+                                debug_print(f"DEBUG: Switched to alternative: {alt_url} (tried: {len(tried_channels)}/{len(all_channel_urls)})")
                                 self.status_var.set(f"Switched to alternative: {alt_url.split('/')[-1]}")
                                 
                                 # Retry with new channel if queue is running
@@ -4200,6 +4255,12 @@ class App(ctk.CTk):
                                     self.after(2000, lambda i=idx: self._start_index(i))
                                     return
                                 break
+                    
+                    # If no live alternative found, but we haven't tried all channels, mark current as tried and wait
+                    if not switched and len(tried_channels) < len(all_channel_urls):
+                        item["tried_channels"] = tried_channels  # Update tried list even if no switch
+                        self.config_data.save()
+                        debug_print(f"DEBUG: No live alternatives found, but {len(all_channel_urls) - len(tried_channels)} channels remain untried")
                 
                 if not switched:
                     # No alternative found, mark for retry
