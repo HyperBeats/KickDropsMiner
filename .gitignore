@@ -9,3 +9,5 @@ build/
 *.spec
 example_response.json
 /useful data
+progressapi_exampleresult.json
+streamerinfo_example.json

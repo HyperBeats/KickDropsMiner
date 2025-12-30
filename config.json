@@ -7,5 +7,7 @@
   "mini_player": false,
   "force_160p": false,
   "dark_mode": false,
-  "language": "en"
+  "language": "en",
+  "auto_start": false,
+  "debug": false
 }

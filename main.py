@@ -87,6 +87,14 @@ CHROME_DATA_DIR = os.path.join(DATA_DIR, "chrome_data")
 os.makedirs(COOKIES_DIR, exist_ok=True)
 os.makedirs(CHROME_DATA_DIR, exist_ok=True)
 
+# Global debug config reference (set when App initializes)
+_DEBUG_CONFIG = None
+
+def debug_print(*args, **kwargs):
+    """Print debug messages only if debug mode is enabled"""
+    if _DEBUG_CONFIG and _DEBUG_CONFIG.debug:
+        print(*args, **kwargs)
+
 # ===============================
 # Traductions (FR/EN)
 # ===============================
@@ -366,6 +374,190 @@ def _kick_username_from_url(url: str):
         return username or None
     except Exception:
         return None
+
+
+def is_campaign_expired(campaign):
+    """Check if a campaign has expired based on ends_at timestamp"""
+    try:
+        ends_at = campaign.get("ends_at")
+        if not ends_at:
+            return False  # No end date means not expired
+        
+        # Parse ISO format timestamp (e.g., "2024-01-01T00:00:00Z" or "2024-01-01T00:00:00.000Z")
+        from datetime import datetime
+        now = datetime.now()
+        
+        if isinstance(ends_at, str):
+            # Try ISO format first
+            try:
+                # Handle various ISO formats
+                ends_at_clean = ends_at.replace("Z", "").replace("+00:00", "")
+                # Try with microseconds
+                try:
+                    end_date = datetime.fromisoformat(ends_at_clean)
+                except:
+                    # Try without microseconds
+                    if "." in ends_at_clean:
+                        ends_at_clean = ends_at_clean.split(".")[0]
+                    end_date = datetime.fromisoformat(ends_at_clean)
+                
+                # Compare (end_date is naive, now is naive, so direct comparison)
+                return now >= end_date
+            except:
+                # Try parsing as Unix timestamp (string)
+                try:
+                    end_date = datetime.fromtimestamp(float(ends_at))
+                    return now >= end_date
+                except:
+                    return False
+        else:
+            # Assume it's a numeric timestamp
+            try:
+                end_date = datetime.fromtimestamp(float(ends_at))
+                return now >= end_date
+            except:
+                return False
+    except Exception as e:
+        print(f"Error checking expiration: {e}")
+        return False  # On error, assume not expired
+
+
+def fetch_live_streamers_by_category(category_id, limit=24, driver=None):
+    """Fetches live streamers currently streaming a specific game category.
+    Uses category_id from the campaign data.
+    Returns list of channel URLs.
+    """
+    if not category_id:
+        return []
+    
+    should_close_driver = False
+    if driver is None:
+        try:
+            driver = make_chrome_driver(headless=False, visible_width=400, visible_height=300)
+            try:
+                driver.set_window_position(-2000, -2000)
+            except:
+                pass
+            driver.get("https://kick.com")
+            time.sleep(1)
+            
+            # Load cookies
+            cookie_path = cookie_file_for_domain("kick.com")
+            if os.path.exists(cookie_path):
+                with open(cookie_path, "r", encoding="utf-8") as f:
+                    cookies = json.load(f)
+                for cookie in cookies:
+                    try:
+                        if "expiry" in cookie and cookie["expiry"] is None:
+                            del cookie["expiry"]
+                        driver.add_cookie(cookie)
+                    except:
+                        pass
+                driver.refresh()
+                time.sleep(1)
+            should_close_driver = True
+        except Exception as e:
+            print(f"Error creating driver for game search: {e}")
+            return []
+    
+    try:
+        # Use the correct API endpoint with category_id
+        api_url = f"https://web.kick.com/api/v1/livestreams?limit={limit}&sort=viewer_count_desc&category_id={category_id}"
+        debug_print(f"DEBUG: Fetching from API: {api_url}")
+        
+        fetch_script = f"""
+        return fetch('{api_url}', {{
+            method: 'GET',
+            headers: {{
+                'Accept': 'application/json',
+            }},
+            credentials: 'include'
+        }})
+        .then(response => {{
+            console.log('Response status:', response.status);
+            return response.text();
+        }})
+        .then(data => data)
+        .catch(error => JSON.stringify({{error: error.toString()}}));
+        """
+        
+        debug_print("DEBUG: Executing fetch script in browser...")
+        page_text = driver.execute_script(fetch_script)
+        debug_print(f"DEBUG: Received response (first 500 chars): {page_text[:500]}")
+        
+        if not page_text or "error" in page_text.lower():
+            debug_print(f"DEBUG: Error in response: {page_text[:500]}")
+            return []
+        
+        debug_print("DEBUG: Parsing JSON response...")
+        data = json.loads(page_text)
+        debug_print(f"DEBUG: Parsed data keys: {list(data.keys())}")
+        
+        streamers = []
+        # Handle response format - nested structure: {"data": {"livestreams": [...]}}
+        data_obj = data.get("data", {})
+        if isinstance(data_obj, dict):
+            # Nested structure: data.livestreams
+            streams = data_obj.get("livestreams", [])
+            debug_print(f"DEBUG: Found {len(streams)} streams in nested structure")
+        elif isinstance(data_obj, list):
+            # Flat structure: data is directly a list
+            streams = data_obj
+            debug_print(f"DEBUG: Found {len(streams)} streams in flat structure")
+        else:
+            streams = []
+            debug_print(f"DEBUG: Unexpected data structure: {type(data_obj)}")
+        
+        debug_print(f"DEBUG: Processing {min(len(streams), limit)} streams (limit={limit})")
+        
+        for idx, stream in enumerate(streams[:limit]):
+            try:
+                debug_print(f"DEBUG: Processing stream {idx + 1}/{min(len(streams), limit)}")
+                # Extract channel slug/username
+                channel = stream.get("channel", {})
+                if not channel:
+                    debug_print(f"DEBUG: Stream {idx + 1} has no channel data")
+                    continue
+                
+                debug_print(f"DEBUG: Channel data keys: {list(channel.keys())}")
+                slug = channel.get("slug")
+                if not slug:
+                    # Try alternative structure
+                    user = channel.get("user", {})
+                    slug = user.get("username") or user.get("slug")
+                    debug_print(f"DEBUG: Got slug from user object: {slug}")
+                
+                if slug:
+                    viewer_count = stream.get("viewer_count", 0)
+                    title = stream.get("session_title", "")
+                    debug_print(f"DEBUG: Adding streamer: {slug} ({viewer_count} viewers) - {title[:50]}")
+                    streamers.append({
+                        "url": f"https://kick.com/{slug}",
+                        "username": slug,
+                        "title": title,
+                        "viewer_count": viewer_count
+                    })
+                else:
+                    debug_print(f"DEBUG: Could not extract slug from stream {idx + 1}")
+            except Exception as e:
+                debug_print(f"DEBUG: Error parsing stream {idx + 1}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        debug_print(f"DEBUG: Successfully parsed {len(streamers)} streamers")
+        return streamers
+    except Exception as e:
+        print(f"Error fetching streamers for category_id {category_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+    finally:
+        if should_close_driver and driver:
+            try:
+                driver.quit()
+            except:
+                pass
 
 
 def fetch_drop_campaigns():
@@ -931,6 +1123,8 @@ class StreamWorker(threading.Thread):
         mini_player=False,
         force_160p=False,
         offline_fresh_checks_to_switch=2,
+        required_category_id=None,
+        cumulative_time_callback=None,
     ):
         super().__init__(daemon=True)
         self.url = url
@@ -948,13 +1142,19 @@ class StreamWorker(threading.Thread):
         self.force_160p = force_160p
         self.completed = False
         self.ended_because_offline = False
+        self.ended_because_wrong_category = False
+        self.required_category_id = required_category_id
+        self.cumulative_time_callback = cumulative_time_callback
         self._offline_fresh_checks = 0
         self.offline_fresh_checks_to_switch = max(0, int(offline_fresh_checks_to_switch or 0))
         # Anti rate-limit: cache "is live" checks
         self._last_live_check = 0.0
         self._last_live_value = True
-        self._live_check_interval = 30  # seconds
+        self._live_check_interval = 10  # seconds (reduced for faster detection)
         self._last_live_source = "unknown"  # api | dom | unknown
+        # Category check interval (check every 30 seconds)
+        self._last_category_check = 0.0
+        self._category_check_interval = 30  # seconds
 
     def run(self):
         domain = domain_from_url(self.url)
@@ -1027,18 +1227,38 @@ class StreamWorker(threading.Thread):
                 ):
                     self.ended_because_offline = True
                     break
+                
+                # Check category if required (every 30 seconds)
+                if self.required_category_id and live:
+                    now = time.time()
+                    if now - self._last_category_check >= self._category_check_interval:
+                        self._last_category_check = now
+                        current_category_id = self.get_streamer_category_id()
+                        if current_category_id is not None and current_category_id != self.required_category_id:
+                            debug_print(f"DEBUG: Streamer changed category from {self.required_category_id} to {current_category_id}, switching...")
+                            self.ended_because_wrong_category = True
+                            break
+                
                 if live:
                     self.elapsed_seconds += 1
                 if time.time() - last_report >= 1:
                     last_report = time.time()
                     if self.on_update:
                         self.on_update(self.elapsed_seconds, live)
-                if (
-                    self.minutes_target
-                    and self.elapsed_seconds >= self.minutes_target * 60
-                ):
-                    self.completed = True
-                    break
+                
+                # Check completion: for global drops, use cumulative time; otherwise use individual time
+                if self.minutes_target:
+                    if self.cumulative_time_callback:
+                        # Global drop - check cumulative time
+                        current_cumulative = self.cumulative_time_callback()
+                        if current_cumulative >= self.minutes_target * 60:
+                            self.completed = True
+                            break
+                    else:
+                        # Regular drop - use individual time
+                        if self.elapsed_seconds >= self.minutes_target * 60:
+                            self.completed = True
+                            break
                 time.sleep(1)
         except Exception as e:
             print("StreamWorker error:", e)
@@ -1056,6 +1276,41 @@ class StreamWorker(threading.Thread):
 
     def stop(self):
         self.stop_event.set()
+    
+    def get_streamer_category_id(self):
+        """Get the current category ID of the streamer's livestream"""
+        if not self.driver:
+            return None
+        
+        try:
+            username = _kick_username_from_url(self.url)
+            if not username:
+                return None
+            
+            api_url = f"https://kick.com/api/v2/channels/{username}"
+            script = """
+            const cb = arguments[arguments.length - 1];
+            fetch(arguments[0], { credentials: 'include', cache: 'no-store', headers: { 'Accept': 'application/json' } })
+              .then(r => r.text())
+              .then(t => cb(t))
+              .catch(e => cb(JSON.stringify({ error: String(e) })));
+            """
+            try:
+                self.driver.set_script_timeout(10)
+            except Exception:
+                pass
+            text = self.driver.execute_async_script(script, api_url)
+            data = json.loads(text) if text else None
+            if isinstance(data, dict) and not data.get("error"):
+                livestream = data.get("livestream")
+                if livestream and livestream.get("is_live"):
+                    categories = livestream.get("categories", [])
+                    if categories and len(categories) > 0:
+                        # Return the first category's ID
+                        return categories[0].get("id")
+        except Exception as e:
+            debug_print(f"DEBUG: Error getting streamer category: {e}")
+        return None
 
     def is_stream_live(self):
         now = time.time()
@@ -1138,8 +1393,8 @@ class StreamWorker(threading.Thread):
             return False
         finally:
             # Add slight jitter to desync multiple workers
-            jitter = random.uniform(-5, 5)
-            base_interval = 15 if self._last_live_value else 8
+            jitter = random.uniform(-3, 3)
+            base_interval = 8 if self._last_live_value else 5  # More frequent when offline
             self._live_check_interval = max(4, base_interval + jitter)
             self._last_live_check = now
 
@@ -1202,6 +1457,8 @@ class Config:
         self.force_160p = False
         self.dark_mode = True  # Dark by default
         self.language = "fr"  # default language code
+        self.auto_start = False  # Auto-start queue on launch
+        self.debug = False  # Debug messages disabled by default
         self.load()
 
     def load(self):
@@ -1209,6 +1466,18 @@ class Config:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.items = data.get("items", [])
+            # Migrate old items format to new format with campaign info
+            for item in self.items:
+                if "campaign_id" not in item:
+                    item["campaign_id"] = None
+                if "campaign_channels" not in item:
+                    item["campaign_channels"] = []
+                if "required_category_id" not in item:
+                    item["required_category_id"] = None
+                if "is_global_drop" not in item:
+                    item["is_global_drop"] = False
+                if "cumulative_time" not in item:
+                    item["cumulative_time"] = 0
             self.chromedriver_path = data.get("chromedriver_path")
             self.extension_path = data.get("extension_path")
             self.mute = data.get("mute", True)
@@ -1217,6 +1486,8 @@ class Config:
             self.force_160p = data.get("force_160p", False)
             self.dark_mode = data.get("dark_mode", True)
             self.language = data.get("language", "fr")
+            self.auto_start = data.get("auto_start", False)
+            self.debug = data.get("debug", False)
         else:
             self.items = []
 
@@ -1231,12 +1502,24 @@ class Config:
             "force_160p": self.force_160p,
             "dark_mode": self.dark_mode,
             "language": self.language,
+            "auto_start": self.auto_start,
+            "debug": self.debug,
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
-    def add(self, url, minutes):
-        self.items.append({"url": url, "minutes": minutes})
+    def add(self, url, minutes, campaign_id=None, campaign_channels=None, required_category_id=None, is_global_drop=False):
+        """Add item with optional campaign grouping"""
+        item = {
+            "url": url,
+            "minutes": minutes,
+            "campaign_id": campaign_id,
+            "campaign_channels": campaign_channels or [],
+            "required_category_id": required_category_id,
+            "is_global_drop": is_global_drop,
+            "cumulative_time": 0,  # Track cumulative time across all streamers in campaign
+        }
+        self.items.append(item)
         self.save()
 
     def remove(self, idx):
@@ -1255,6 +1538,9 @@ class App(ctk.CTk):
         self.minsize(900, 700)
 
         self.config_data = Config()
+        # Set global debug config reference
+        global _DEBUG_CONFIG
+        _DEBUG_CONFIG = self.config_data
         self.workers = {}
         self._interactive_driver = None  # Chrome pour capture de cookies
         self.queue_running = False
@@ -1301,6 +1587,15 @@ class App(ctk.CTk):
         )
 
         self.refresh_list()
+        
+        # Start offline retry monitor
+        self._start_offline_retry_monitor()
+        
+        # Auto-start queue if enabled
+        if self.config_data.auto_start and self.config_data.items:
+            # Delay slightly to let UI finish loading
+            self.after(1000, self._auto_start_queue)
+        
         # Properly close all browsers when closing the app
         try:
             self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1367,9 +1662,11 @@ class App(ctk.CTk):
         btn_remove = ctk.CTkButton(
             self.sidebar,
             text=self.t("btn_remove"),
-            command=self.remove_selected,
             width=180,
         )
+        # Bind to the underlying tkinter widget to detect Ctrl key
+        # We'll handle both normal and Ctrl+click in the bound function
+        btn_remove.bind("<Button-1>", self.on_remove_button_click)
         btn_remove.grid(row=2, column=0, padx=14, pady=6, sticky="w")
 
         btn_start_queue = ctk.CTkButton(
@@ -1408,94 +1705,31 @@ class App(ctk.CTk):
         )
         btn_drops.grid(row=6, column=0, padx=14, pady=6, sticky="w")
 
-        # Fichiers
-        btn_chromedriver = ctk.CTkButton(
+        # Settings button
+        btn_settings = ctk.CTkButton(
             self.sidebar,
-            text=self.t("btn_chromedriver"),
-            command=self.choose_chromedriver,
+            text="⚙️ Settings",
+            command=self.show_settings_window,
             width=180,
         )
-        btn_chromedriver.grid(row=7, column=0, padx=14, pady=(18, 6), sticky="w")
+        btn_settings.grid(row=7, column=0, padx=14, pady=(18, 6), sticky="w")
 
-        btn_extension = ctk.CTkButton(
-            self.sidebar,
-            text=self.t("btn_extension"),
-            command=self.choose_extension,
-            width=180,
-        )
-        btn_extension.grid(row=8, column=0, padx=14, pady=6, sticky="w")
-
-        # Toggles
+        # Initialize toggle variables (used in settings window)
         self.mute_var = tk.BooleanVar(value=bool(self.config_data.mute))
         self.hide_player_var = tk.BooleanVar(value=bool(self.config_data.hide_player))
         self.mini_player_var = tk.BooleanVar(value=bool(self.config_data.mini_player))
         self.force_160p_var = tk.BooleanVar(value=bool(self.config_data.force_160p))
-
-        sw_mute = ctk.CTkSwitch(
-            self.sidebar,
-            text=self.t("switch_mute"),
-            command=self.on_toggle_mute,
-            variable=self.mute_var,
-        )
-        sw_mute.grid(row=9, column=0, padx=14, pady=(18, 6), sticky="w")
-
-        sw_hide = ctk.CTkSwitch(
-            self.sidebar,
-            text=self.t("switch_hide"),
-            command=self.on_toggle_hide,
-            variable=self.hide_player_var,
-        )
-        sw_hide.grid(row=10, column=0, padx=14, pady=6, sticky="w")
-
-        sw_mini = ctk.CTkSwitch(
-            self.sidebar,
-            text=self.t("switch_mini"),
-            command=self.on_toggle_mini,
-            variable=self.mini_player_var,
-        )
-        sw_mini.grid(row=11, column=0, padx=14, pady=6, sticky="w")
-
-        sw_force_160p = ctk.CTkSwitch(
-            self.sidebar,
-            text=self.t("switch_force_160p"),
-            command=self.on_toggle_force_160p,
-            variable=self.force_160p_var,
-        )
-        sw_force_160p.grid(row=12, column=0, padx=14, pady=6, sticky="w")
-
-        # Thème
+        self.auto_start_var = tk.BooleanVar(value=bool(self.config_data.auto_start))
         self.theme_var = tk.StringVar(
             value=self.t("theme_dark")
             if self.config_data.dark_mode
             else self.t("theme_light")
         )
-        theme_label = ctk.CTkLabel(self.sidebar, text=self.t("label_theme"))
-        theme_label.grid(row=13, column=0, padx=14, pady=(18, 4), sticky="w")
-        theme_menu = ctk.CTkOptionMenu(
-            self.sidebar,
-            values=[self.t("theme_dark"), self.t("theme_light")],
-            command=self.change_theme,
-            variable=self.theme_var,
-            width=180,
-        )
-        theme_menu.grid(row=14, column=0, padx=14, pady=(0, 14), sticky="w")
-
-        # Language (populate from available locale files)
         language_choices = self._get_language_choices()
         current_label = self._language_label(self.config_data.language)
         if current_label not in language_choices and language_choices:
             current_label = language_choices[0]
         self.lang_var = tk.StringVar(value=current_label)
-        lang_label = ctk.CTkLabel(self.sidebar, text=self.t("label_language"))
-        lang_label.grid(row=15, column=0, padx=14, pady=(4, 4), sticky="w")
-        lang_menu = ctk.CTkOptionMenu(
-            self.sidebar,
-            values=language_choices,
-            command=self.change_language,
-            variable=self.lang_var,
-            width=180,
-        )
-        lang_menu.grid(row=16, column=0, padx=14, pady=(0, 14), sticky="w")
 
     def _build_content(self):
         header = ctk.CTkFrame(self.content, corner_radius=12)
@@ -1619,6 +1853,216 @@ class App(ctk.CTk):
             pass
 
     # ----------- Theme -----------
+    def show_settings_window(self):
+        """Open settings window with all toggles and dropdowns"""
+        # Create settings window
+        settings_window = ctk.CTkToplevel(self)
+        settings_window.title("Settings")
+        settings_window.geometry("450x650")
+        settings_window.resizable(False, False)
+        settings_window.transient(self)
+        settings_window.grab_set()  # Make it modal
+        
+        # Center the window
+        settings_window.update_idletasks()
+        x = (settings_window.winfo_screenwidth() // 2) - (450 // 2)
+        y = (settings_window.winfo_screenheight() // 2) - (700 // 2)
+        settings_window.geometry(f"450x700+{x}+{y}")
+        
+        # Consistent theme
+        ctk.set_appearance_mode("Dark" if self.config_data.dark_mode else "Light")
+        
+        # Main frame with padding
+        main_frame = ctk.CTkFrame(settings_window)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = ctk.CTkLabel(
+            main_frame,
+            text="⚙️ Settings",
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        title_label.pack(pady=(0, 20))
+        
+        # Scrollable frame for settings
+        scrollable_frame = ctk.CTkScrollableFrame(main_frame)
+        scrollable_frame.pack(fill="both", expand=True)
+        
+        # Player Settings Section
+        player_section = ctk.CTkFrame(scrollable_frame)
+        player_section.pack(fill="x", pady=(0, 15))
+        
+        player_title = ctk.CTkLabel(
+            player_section,
+            text="Player Settings",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        player_title.pack(anchor="w", padx=15, pady=(15, 10))
+        
+        # Mute toggle
+        sw_mute = ctk.CTkSwitch(
+            player_section,
+            text=self.t("switch_mute"),
+            command=self.on_toggle_mute,
+            variable=self.mute_var,
+        )
+        sw_mute.pack(anchor="w", padx=15, pady=5)
+        
+        # Hide player toggle
+        sw_hide = ctk.CTkSwitch(
+            player_section,
+            text=self.t("switch_hide"),
+            command=self.on_toggle_hide,
+            variable=self.hide_player_var,
+        )
+        sw_hide.pack(anchor="w", padx=15, pady=5)
+        
+        # Mini player toggle
+        sw_mini = ctk.CTkSwitch(
+            player_section,
+            text=self.t("switch_mini"),
+            command=self.on_toggle_mini,
+            variable=self.mini_player_var,
+        )
+        sw_mini.pack(anchor="w", padx=15, pady=5)
+        
+        # Force 160p toggle
+        sw_force_160p = ctk.CTkSwitch(
+            player_section,
+            text=self.t("switch_force_160p"),
+            command=self.on_toggle_force_160p,
+            variable=self.force_160p_var,
+        )
+        sw_force_160p.pack(anchor="w", padx=15, pady=(5, 15))
+        
+        # Queue Settings Section
+        queue_section = ctk.CTkFrame(scrollable_frame)
+        queue_section.pack(fill="x", pady=(0, 15))
+        
+        queue_title = ctk.CTkLabel(
+            queue_section,
+            text="Queue Settings",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        queue_title.pack(anchor="w", padx=15, pady=(15, 10))
+        
+        # Auto-start toggle
+        sw_auto_start = ctk.CTkSwitch(
+            queue_section,
+            text="Auto-start queue",
+            command=self.on_toggle_auto_start,
+            variable=self.auto_start_var,
+        )
+        sw_auto_start.pack(anchor="w", padx=15, pady=(5, 15))
+        
+        # Appearance Settings Section
+        appearance_section = ctk.CTkFrame(scrollable_frame)
+        appearance_section.pack(fill="x", pady=(0, 15))
+        
+        appearance_title = ctk.CTkLabel(
+            appearance_section,
+            text="Appearance",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        appearance_title.pack(anchor="w", padx=15, pady=(15, 10))
+        
+        # Theme dropdown
+        theme_label = ctk.CTkLabel(appearance_section, text=self.t("label_theme"))
+        theme_label.pack(anchor="w", padx=15, pady=(5, 5))
+        theme_menu = ctk.CTkOptionMenu(
+            appearance_section,
+            values=[self.t("theme_dark"), self.t("theme_light")],
+            command=self.change_theme,
+            variable=self.theme_var,
+            width=350,
+        )
+        theme_menu.pack(anchor="w", padx=15, pady=(0, 10))
+        
+        # Language dropdown
+        language_choices = self._get_language_choices()
+        lang_label = ctk.CTkLabel(appearance_section, text=self.t("label_language"))
+        lang_label.pack(anchor="w", padx=15, pady=(5, 5))
+        lang_menu = ctk.CTkOptionMenu(
+            appearance_section,
+            values=language_choices,
+            command=self.change_language,
+            variable=self.lang_var,
+            width=350,
+        )
+        lang_menu.pack(anchor="w", padx=15, pady=(0, 15))
+        
+        # Browser Settings Section
+        browser_section = ctk.CTkFrame(scrollable_frame)
+        browser_section.pack(fill="x", pady=(0, 15))
+        
+        browser_title = ctk.CTkLabel(
+            browser_section,
+            text="Browser Settings",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        browser_title.pack(anchor="w", padx=15, pady=(15, 10))
+        
+        # ChromeDriver button
+        def choose_chromedriver_wrapper():
+            self.choose_chromedriver()
+            settings_window.lift()
+            settings_window.focus_force()
+            # Refresh the window to update labels
+            settings_window.destroy()
+            self.show_settings_window()
+        
+        btn_chromedriver = ctk.CTkButton(
+            browser_section,
+            text=self.t("btn_chromedriver"),
+            command=choose_chromedriver_wrapper,
+            width=350,
+        )
+        btn_chromedriver.pack(anchor="w", padx=15, pady=5)
+        
+        # Show current chromedriver path if set
+        chromedriver_label = ctk.CTkLabel(
+            browser_section,
+            text=f"Current: {os.path.basename(self.config_data.chromedriver_path) if self.config_data.chromedriver_path else 'Not set'}",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray50")
+        )
+        chromedriver_label.pack(anchor="w", padx=15, pady=(0, 10))
+        
+        # Chrome Extension button
+        def choose_extension_wrapper():
+            self.choose_extension()
+            settings_window.lift()
+            settings_window.focus_force()
+            # Refresh the window to update labels
+            settings_window.destroy()
+            self.show_settings_window()
+        
+        btn_extension = ctk.CTkButton(
+            browser_section,
+            text=self.t("btn_extension"),
+            command=choose_extension_wrapper,
+            width=350,
+        )
+        btn_extension.pack(anchor="w", padx=15, pady=5)
+        
+        # Show current extension path if set
+        extension_label = ctk.CTkLabel(
+            browser_section,
+            text=f"Current: {os.path.basename(self.config_data.extension_path) if self.config_data.extension_path else 'Not set'}",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray50")
+        )
+        extension_label.pack(anchor="w", padx=15, pady=(0, 15))
+        
+        # Close button
+        close_btn = ctk.CTkButton(
+            settings_window,
+            text="Close",
+            command=settings_window.destroy,
+            width=200,
+        )
+        close_btn.pack(pady=15)
+
     def change_theme(self, choice):
         # Accepts FR/EN
         dark = choice in (self.t("theme_dark"), "Sombre", "Dark")
@@ -1749,7 +2193,52 @@ class App(ctk.CTk):
         self.config_data.add(url, minutes or 0)
         self.refresh_list()
         self.status_var.set(self.t("status_link_added"))
+        # Auto-start if enabled and queue not running
+        if self.config_data.auto_start and not self.queue_running:
+            self.after(500, self._auto_start_queue)
 
+    def on_remove_button_click(self, event):
+        """Handle remove button click - check for Ctrl key"""
+        # Check if Ctrl key is pressed (state & 0x4 is Control modifier)
+        ctrl_pressed = (event.state & 0x4) != 0
+        
+        if ctrl_pressed:
+            # Ctrl is pressed - show clear all dialog
+            self.after(0, self.clear_all_items)
+        else:
+            # Normal remove action
+            self.after(0, self.remove_selected)
+    
+    def clear_all_items(self):
+        """Clear all items from the list after confirmation"""
+        if not self.config_data.items:
+            return  # Nothing to clear
+        
+        # Show confirmation dialog
+        result = messagebox.askyesno(
+            "Clear All Items",
+            f"Are you sure you want to remove all {len(self.config_data.items)} item(s) from the list?",
+            icon="warning"
+        )
+        
+        if result:
+            # Stop all running workers
+            for idx, worker in list(self.workers.items()):
+                try:
+                    worker.stop()
+                except Exception:
+                    pass
+            self.workers.clear()
+            
+            # Clear all items
+            self.config_data.items = []
+            self.config_data.save()
+            
+            # Refresh UI
+            self.refresh_list()
+            self.status_var.set("All items cleared")
+            debug_print(f"DEBUG: Cleared all items from list")
+    
     def remove_selected(self):
         sel = self.tree.selection()
         if not sel:
@@ -1776,7 +2265,37 @@ class App(ctk.CTk):
         self._start_index(idx)
 
     def _start_index(self, idx):
+        """Start a stream, ensuring only one runs at a time (Kick limitation)"""
+        # Stop any currently running stream (Kick only allows 1 at a time)
+        if len(self.workers) > 0:
+            # Find and stop the currently running worker
+            for running_idx, worker in list(self.workers.items()):
+                worker.stop()
+                del self.workers[running_idx]
+                # Mark as not finished so it can be retried
+                if running_idx < len(self.config_data.items):
+                    self.config_data.items[running_idx]["finished"] = False
+            time.sleep(2)  # Brief pause to let browser close
+        
         item = self.config_data.items[idx]
+        
+        # Try alternative channels from same campaign if current is offline
+        if not kick_is_live_by_api(item["url"]):
+            campaign_channels = item.get("campaign_channels", [])
+            if campaign_channels:
+                # Try to find a live alternative channel
+                for alt_channel in campaign_channels:
+                    alt_url = alt_channel.get("url") if isinstance(alt_channel, dict) else alt_channel
+                    if alt_url and alt_url != item["url"]:
+                        if kick_is_live_by_api(alt_url):
+                            # Switch to this alternative channel
+                            self.config_data.items[idx]["url"] = alt_url
+                            self.config_data.save()
+                            self.refresh_list()
+                            item = self.config_data.items[idx]  # Update item reference
+                            break
+        
+        # Check again after potential channel switch
         if not kick_is_live_by_api(item["url"]):
             try:
                 values = list(self.tree.item(str(idx), "values"))
@@ -1794,22 +2313,46 @@ class App(ctk.CTk):
 
         cookie_path = cookie_file_for_domain(domain)
         if not os.path.exists(cookie_path):
-            # First try to automatically import from browser
+            # Auto-import cookies silently (no popup for automation)
             try:
-                if CookieManager.import_from_browser(domain):
-                    self.status_var.set(self.t("cookies_saved_for", domain=domain))
-                else:
+                if not CookieManager.import_from_browser(domain):
+                    # Only show popup if auto-import fails and we're not in auto mode
+                    if not self.config_data.auto_start:
+                        if messagebox.askyesno(
+                            self.t("cookies_missing_title"), self.t("cookies_missing_msg")
+                        ):
+                            self.obtain_cookies_interactively(item["url"], domain)
+                    else:
+                        # In auto mode, skip items without cookies
+                        self.status_var.set(f"Skipping {item['url']} - no cookies")
+                        return
+            except Exception:
+                if not self.config_data.auto_start:
                     if messagebox.askyesno(
                         self.t("cookies_missing_title"), self.t("cookies_missing_msg")
                     ):
                         self.obtain_cookies_interactively(item["url"], domain)
-            except Exception:
-                if messagebox.askyesno(
-                    self.t("cookies_missing_title"), self.t("cookies_missing_msg")
-                ):
-                    self.obtain_cookies_interactively(item["url"], domain)
+                else:
+                    return
 
         stop_event = threading.Event()
+        
+        # Setup cumulative time callback for global drops
+        is_global_drop = item.get("is_global_drop", False)
+        cumulative_time_callback = None
+        if is_global_drop:
+            campaign_id = item.get("campaign_id")
+            def get_cumulative_time():
+                """Get current cumulative time for this campaign"""
+                if not campaign_id:
+                    return 0
+                total = 0
+                for other_item in self.config_data.items:
+                    if other_item.get("campaign_id") == campaign_id:
+                        total += other_item.get("cumulative_time", 0)
+                return total
+            cumulative_time_callback = get_cumulative_time
+        
         worker = StreamWorker(
             item["url"],
             item["minutes"],
@@ -1822,6 +2365,8 @@ class App(ctk.CTk):
             mute=bool(self.mute_var.get()),
             mini_player=bool(self.mini_player_var.get()),
             force_160p=bool(self.config_data.force_160p),
+            required_category_id=item.get("required_category_id"),
+            cumulative_time_callback=cumulative_time_callback,
         )
         self.workers[idx] = worker
         worker.start()
@@ -1834,6 +2379,12 @@ class App(ctk.CTk):
         self._run_queue_from(0)
 
     def _run_queue_from(self, start_idx: int):
+        """Run queue ensuring only one stream at a time"""
+        # Ensure no other streams are running
+        if len(self.workers) > 0:
+            # Wait for current stream to finish
+            return
+        
         for i in range(start_idx, len(self.config_data.items)):
             item = self.config_data.items[i]
             if item.get("finished"):
@@ -1845,7 +2396,7 @@ class App(ctk.CTk):
             if i in after:
                 self.queue_current_idx = i
                 self.status_var.set(self.t("queue_running_status", url=item["url"]))
-                return
+                return  # Only one stream at a time
         self.queue_running = False
         self.queue_current_idx = None
         self.status_var.set(self.t("queue_finished_status"))
@@ -2108,6 +2659,13 @@ class App(ctk.CTk):
                         campaign["progress_status"] = prog.get("status", "not_started")
                         campaign["progress_units"] = prog.get("progress_units", 0)
                         
+                        # Merge category from progress data if not already in campaign
+                        if "category" in prog and "category" not in campaign:
+                            campaign["category"] = prog["category"]
+                        elif "category" in prog:
+                            # Update category if progress has more complete data
+                            campaign["category"] = prog["category"]
+                        
                         # Merge reward progress
                         reward_progress = {}
                         for reward in prog.get("rewards", []):
@@ -2135,9 +2693,22 @@ class App(ctk.CTk):
                             reward["progress"] = 0.0
                             reward["claimed"] = False
 
-                # Group campaigns by game and sort by progress status
-                games = {}
+                # Filter campaigns into active and expired
+                active_campaigns = []
+                expired_campaigns = []
+                
                 for campaign in campaigns:
+                    if is_campaign_expired(campaign):
+                        expired_campaigns.append(campaign)
+                    else:
+                        active_campaigns.append(campaign)
+                
+                # Group active campaigns by game and sort by progress status
+                games = {}
+                for campaign in active_campaigns:
+                    # Double-check: skip if expired (safety check)
+                    if is_campaign_expired(campaign):
+                        continue
                     game_name = campaign["game"]
                     if game_name not in games:
                         games[game_name] = {
@@ -2161,24 +2732,48 @@ class App(ctk.CTk):
                 
                 for game_name, game_data in games.items():
                     game_data["campaigns"].sort(key=sort_key)
+                
+                # Sort games by priority: games with in-progress campaigns first
+                def game_priority(game_data):
+                    campaigns = game_data["campaigns"]
+                    # Check if any campaign is in progress
+                    has_in_progress = any(c.get("progress_status") == "in progress" for c in campaigns)
+                    if has_in_progress:
+                        return 0
+                    # Check if any campaign is not started
+                    has_not_started = any(c.get("progress_status") == "not_started" for c in campaigns)
+                    if has_not_started:
+                        return 1
+                    return 2
+                
+                # Convert to list, sort, then back to dict (or use OrderedDict)
+                games_list = sorted(games.items(), key=lambda x: game_priority(x[1]))
+                games = dict(games_list)
 
-                status_label.configure(
-                    text=self.t("drops_loaded", count=len(campaigns))
-                )
+                status_text = self.t("drops_loaded", count=len(active_campaigns))
+                if expired_campaigns:
+                    status_text += f" ({len(expired_campaigns)} expired)"
+                status_label.configure(text=status_text)
 
+                # Add toggle for showing expired campaigns
+                if not hasattr(scrollable_frame, "_show_expired_var"):
+                    scrollable_frame._show_expired_var = tk.BooleanVar(value=False)
+                
+                show_expired = scrollable_frame._show_expired_var.get()
+                
                 # Display each game with its campaigns
                 row_idx = 0
                 for game_name, game_data in games.items():
                     # Separate campaigns into active and completed
-                    active_campaigns = []
-                    completed_campaigns = []
+                    game_active_campaigns = []
+                    game_completed_campaigns = []
                     
                     for campaign in game_data["campaigns"]:
                         status = campaign.get("progress_status", "not_started")
                         if status == "claimed":
-                            completed_campaigns.append(campaign)
+                            game_completed_campaigns.append(campaign)
                         else:
-                            active_campaigns.append(campaign)
+                            game_active_campaigns.append(campaign)
                     # Frame for game (collapsible) - improved style
                     game_frame = ctk.CTkFrame(
                         scrollable_frame, 
@@ -2300,11 +2895,11 @@ class App(ctk.CTk):
                     # Display active campaigns first
                     camp_idx = 0
                     for campaign in active_campaigns:
-                        self._create_campaign_display(campaigns_container, campaign, camp_idx, scrollable_frame, game_data)
+                        self._create_campaign_display(campaigns_container, campaign, camp_idx, scrollable_frame, game_data, status_label)
                         camp_idx += 1
                     
                     # Display completed campaigns in a collapsible section
-                    if completed_campaigns:
+                    if game_completed_campaigns:
                         # Add separator if there are active campaigns
                         if active_campaigns:
                             separator = ctk.CTkFrame(campaigns_container, fg_color="transparent", height=2)
@@ -2333,7 +2928,7 @@ class App(ctk.CTk):
                         
                         completed_header_label = ctk.CTkLabel(
                             completed_header_frame,
-                            text=f"{self.t('drops_completed_campaigns')} ({len(completed_campaigns)})",
+                            text=f"{self.t('drops_completed_campaigns')} ({len(game_completed_campaigns)})",
                             font=ctk.CTkFont(size=12, weight="bold"),
                             text_color=("gray60", "gray40")
                         )
@@ -2363,12 +2958,31 @@ class App(ctk.CTk):
                         completed_header_label.bind("<Button-1>", toggle_completed)
                         
                         # Display completed campaigns
-                        for comp_idx, campaign in enumerate(completed_campaigns):
-                            self._create_campaign_display(completed_container, campaign, comp_idx, scrollable_frame, game_data)
+                        for comp_idx, campaign in enumerate(game_completed_campaigns):
+                            self._create_campaign_display(completed_container, campaign, comp_idx, scrollable_frame, game_data, status_label)
                         
                         camp_idx += 2  # Skip header and container rows
                     
                     row_idx += 1
+                
+                # Display expired campaigns section if toggle is on
+                if expired_campaigns and hasattr(scrollable_frame, "_show_expired_var") and scrollable_frame._show_expired_var.get():
+                        expired_separator = ctk.CTkFrame(scrollable_frame, fg_color=("gray70", "gray30"), height=2)
+                        expired_separator.grid(row=row_idx, column=0, sticky="ew", padx=0, pady=15)
+                        row_idx += 1
+                        
+                        expired_label = ctk.CTkLabel(
+                            scrollable_frame,
+                            text=f"⏰ Expired Campaigns ({len(expired_campaigns)})",
+                            font=ctk.CTkFont(size=14, weight="bold"),
+                            text_color=("#6b7280", "#9ca3af"),
+                        )
+                        expired_label.grid(row=row_idx, column=0, sticky="w", padx=15, pady=10)
+                        row_idx += 1
+                        
+                        for exp_idx, campaign in enumerate(expired_campaigns):
+                            self._create_campaign_display(scrollable_frame, campaign, exp_idx, scrollable_frame, {"image": ""}, status_label)
+                            row_idx += 1
                 
                 # Force update
                 scrollable_frame.update_idletasks()
@@ -2387,7 +3001,118 @@ class App(ctk.CTk):
         # Call on UI thread in background to avoid blocking
         threading.Thread(target=display_campaigns, daemon=True).start()
 
-    def _create_campaign_display(self, parent, campaign, camp_idx, scrollable_frame, game_data):
+    def _auto_find_streamers_for_game(self, campaign, category_id, scrollable_frame, status_label):
+        """Auto-find and add live streamers for a global drop campaign"""
+        def find_and_add():
+            game_name = campaign.get('game', 'game')
+            debug_print(f"DEBUG: Starting search for live streamers")
+            debug_print(f"DEBUG: Campaign: {campaign.get('name', 'unknown')}")
+            debug_print(f"DEBUG: Game: {game_name}")
+            debug_print(f"DEBUG: Category ID: {category_id}")
+            
+            status_label.configure(text=f"🔍 Searching for live streamers of {game_name}...")
+            
+            # Use existing driver from drops window if available, or create new one
+            driver = None
+            try:
+                debug_print("DEBUG: Attempting to get driver from drops fetch...")
+                # Try to get driver from current drops fetch
+                result = fetch_drops_campaigns_and_progress()
+                driver = result.get("driver")
+                if driver:
+                    debug_print("DEBUG: Reusing existing driver")
+                else:
+                    debug_print("DEBUG: No existing driver, will create new one")
+            except Exception as e:
+                debug_print(f"DEBUG: Error getting driver: {e}")
+                pass
+            
+            debug_print(f"DEBUG: Calling fetch_live_streamers_by_category with category_id={category_id}")
+            streamers = fetch_live_streamers_by_category(category_id, limit=24, driver=driver)
+            debug_print(f"DEBUG: Found {len(streamers)} streamers")
+            
+            if not streamers:
+                status_label.configure(text=f"❌ No live streamers found for {game_name}")
+                debug_print(f"DEBUG: No streamers found, closing driver if needed")
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                return
+            
+            debug_print(f"DEBUG: Processing {len(streamers)} streamers to add to queue")
+            status_label.configure(text=f"📝 Adding {len(streamers)} streamer(s) to queue...")
+            
+            # Calculate maximum required time from rewards (cumulative drops)
+            rewards = campaign.get("rewards", [])
+            max_required_minutes = 0
+            for reward in rewards:
+                required_units = reward.get("required_units", 0)
+                if required_units > max_required_minutes:
+                    max_required_minutes = required_units
+            
+            # If no rewards found, default to 120
+            if max_required_minutes == 0:
+                max_required_minutes = 120
+            
+            debug_print(f"DEBUG: Campaign has {len(rewards)} rewards, max required: {max_required_minutes} minutes")
+            
+            # Add all found streamers to queue
+            count = 0
+            skipped = 0
+            campaign_id = campaign.get("id")
+            all_streamers = [{"url": s["url"], "username": s["username"]} for s in streamers]
+            
+            for streamer in streamers:
+                try:
+                    url = streamer["url"]
+                    username = streamer.get("username", "unknown")
+                    debug_print(f"DEBUG: Processing streamer: {username} ({url})")
+                    
+                    if self._is_channel_in_list(url):
+                        debug_print(f"DEBUG: Streamer {username} already in list, skipping")
+                        skipped += 1
+                        continue
+                    
+                    # Store all streamers as alternatives for each other
+                    # Use max_required_minutes for cumulative drops
+                    debug_print(f"DEBUG: Adding {username} to queue with target: {max_required_minutes} minutes")
+                    self.config_data.add(
+                        url, 
+                        max_required_minutes, 
+                        campaign_id, 
+                        all_streamers,
+                        required_category_id=category_id,
+                        is_global_drop=True
+                    )
+                    count += 1
+                except Exception as e:
+                    debug_print(f"DEBUG: Error adding streamer {streamer.get('username', 'unknown')}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            debug_print(f"DEBUG: Added {count} streamers, skipped {skipped} (already in list)")
+            self.refresh_list()
+            status_label.configure(text=f"✅ Added {count} live streamer(s) for {game_name}" + (f" ({skipped} already in list)" if skipped > 0 else ""))
+            
+            # Auto-start if enabled
+            if self.config_data.auto_start and not self.queue_running:
+                debug_print("DEBUG: Auto-start enabled, starting queue")
+                self.after(500, self._auto_start_queue)
+            else:
+                debug_print("DEBUG: Auto-start disabled or queue already running")
+            
+            if driver:
+                try:
+                    debug_print("DEBUG: Closing driver")
+                    driver.quit()
+                except Exception as e:
+                    debug_print(f"DEBUG: Error closing driver: {e}")
+        
+        threading.Thread(target=find_and_add, daemon=True).start()
+
+    def _create_campaign_display(self, parent, campaign, camp_idx, scrollable_frame, game_data, status_label=None):
         """Helper function to create a campaign display frame"""
         try:
             campaign_frame = ctk.CTkFrame(
@@ -2585,13 +3310,67 @@ class App(ctk.CTk):
             channel_buttons = []
 
             if not campaign["channels"]:
+                # Global drop - show option to auto-find streamers
+                global_drop_frame = ctk.CTkFrame(channels_frame, fg_color="transparent")
+                global_drop_frame.grid(row=0, column=0, sticky="ew", pady=5)
+                global_drop_frame.grid_columnconfigure(0, weight=1)
+                
                 no_channels_label = ctk.CTkLabel(
-                    channels_frame,
+                    global_drop_frame,
                     text=self.t("drops_no_channels"),
                     text_color=("#6b7280", "#9ca3af"),
                     font=ctk.CTkFont(size=11, slant="italic"),
                 )
-                no_channels_label.grid(row=0, column=0, sticky="w", pady=5)
+                no_channels_label.grid(row=0, column=0, sticky="w")
+                
+                # Button to auto-find streamers for this game
+                # Get category_id from campaign (from progress API or campaigns API)
+                category = campaign.get("category", {})
+                category_id = category.get("id") if isinstance(category, dict) else None
+                
+                # Also check in progress_data if category not found
+                if not category_id:
+                    progress_data = campaign.get("progress_data", {})
+                    if isinstance(progress_data, dict):
+                        progress_category = progress_data.get("category", {})
+                        if isinstance(progress_category, dict):
+                            category_id = progress_category.get("id")
+                
+                # Try alternative structure (if category is not nested)
+                if not category_id:
+                    category_id = campaign.get("category_id")
+                
+                # Always show button, but disable if no category_id
+                def find_streamers(c=campaign, cid=category_id, sl=status_label):
+                    if not cid:
+                        if sl:
+                            sl.configure(text="Error: No category_id found for this campaign")
+                        debug_print(f"DEBUG: Campaign structure: {list(c.keys())}")
+                        debug_print(f"DEBUG: Category: {c.get('category')}")
+                        debug_print(f"DEBUG: Progress data: {c.get('progress_data', {}).get('category') if isinstance(c.get('progress_data'), dict) else 'N/A'}")
+                        return
+                    if sl:
+                        self._auto_find_streamers_for_game(c, cid, scrollable_frame, sl)
+                    else:
+                        debug_print("DEBUG: No status_label available")
+                
+                find_btn = ctk.CTkButton(
+                    global_drop_frame,
+                    text="🔍 Find Live Streamers",
+                    width=180,
+                    height=30,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    fg_color=("#10b981", "#059669") if category_id else ("#6b7280", "#4b5563"),
+                    hover_color=("#059669", "#047857") if category_id else ("#4b5563", "#374151"),
+                    command=find_streamers,
+                    state="normal" if category_id else "disabled",
+                )
+                find_btn.grid(row=0, column=1, padx=(10, 0), sticky="e")
+                
+                if not category_id:
+                    debug_print(f"DEBUG: No category_id found for campaign {campaign.get('name', 'unknown')}")
+                    debug_print(f"DEBUG: Campaign keys: {list(campaign.keys())}")
+                    debug_print(f"DEBUG: Category value: {campaign.get('category')}")
             else:
                 # List of channels with buttons - improved design
                 for ch_idx, channel in enumerate(campaign["channels"][:5]):
@@ -2635,7 +3414,7 @@ class App(ctk.CTk):
                     channel_buttons.append((channel_url, action_btn, ch_label, channel['username']))
                     
                     # Function to toggle button state
-                    def toggle_channel(url=channel_url, btn=action_btn, label=ch_label, username=channel['username']):
+                    def toggle_channel(url=channel_url, btn=action_btn, label=ch_label, username=channel['username'], camp=campaign):
                         if self._is_channel_in_list(url):
                             # Remove
                             self._remove_drop_channel(url)
@@ -2648,7 +3427,7 @@ class App(ctk.CTk):
                             label.configure(text=f"📺 {username}")
                         else:
                             # Add
-                            self._add_drop_channel(url)
+                            self._add_drop_channel(url, 120, camp)
                             # Update button and label (icon only)
                             btn.configure(
                                 text="✗ Remove",
@@ -2706,9 +3485,7 @@ class App(ctk.CTk):
                                 label.configure(text=f"📺 {username}")
                         else:
                             # Add all
-                            for ch in c["channels"]:
-                                if not self._is_channel_in_list(ch['url']):
-                                    self._add_drop_channel(ch['url'])
+                            self._add_all_campaign_channels(c)
                             # Update bulk button
                             bulk_btn.configure(
                                 text=f"✨ {translate(self.config_data.language, 'btn_remove_all_channels')}",
@@ -2741,7 +3518,7 @@ class App(ctk.CTk):
                                 label.configure(text=f"📺 {username}")
                             else:
                                 # Add
-                                self._add_drop_channel(url)
+                                self._add_drop_channel(url, 120, c)
                                 btn.configure(
                                     text="✗ Remove",
                                     fg_color=("#ef4444", "#dc2626"),
@@ -3011,12 +3788,54 @@ class App(ctk.CTk):
                 return idx
         return None
 
-    def _add_drop_channel(self, url, minutes=120):
-        """Add a drop channel to the queue"""
+    def _add_drop_channel(self, url, minutes=120, campaign=None):
+        """Add a drop channel to the queue with campaign info"""
         try:
-            self.config_data.add(url, minutes)
+            campaign_id = campaign.get("id") if campaign else None
+            campaign_channels = [
+                {"url": ch["url"], "username": ch.get("username", "")} 
+                for ch in campaign.get("channels", [])
+            ] if campaign else []
+            
+            # Calculate max required time from rewards if campaign has rewards
+            if campaign:
+                rewards = campaign.get("rewards", [])
+                if rewards:
+                    max_required = 0
+                    for reward in rewards:
+                        required_units = reward.get("required_units", 0)
+                        if required_units > max_required:
+                            max_required = required_units
+                    if max_required > 0:
+                        minutes = max_required
+            
+            # Get category_id from campaign
+            required_category_id = None
+            if campaign:
+                category = campaign.get("category", {})
+                if isinstance(category, dict):
+                    required_category_id = category.get("id")
+                else:
+                    # Try from progress_data
+                    progress_data = campaign.get("progress_data", {})
+                    if isinstance(progress_data, dict):
+                        progress_category = progress_data.get("category", {})
+                        if isinstance(progress_category, dict):
+                            required_category_id = progress_category.get("id")
+            
+            self.config_data.add(
+                url, 
+                minutes, 
+                campaign_id, 
+                campaign_channels,
+                required_category_id=required_category_id,
+                is_global_drop=False  # Regular drop, not global
+            )
             self.refresh_list()
             self.status_var.set(self.t("drops_added", channel=url.split("/")[-1]))
+            # Auto-start if enabled and queue not running
+            if self.config_data.auto_start and not self.queue_running:
+                self.after(500, self._auto_start_queue)
         except Exception as e:
             print(f"Error adding channel: {e}")
     
@@ -3041,17 +3860,62 @@ class App(ctk.CTk):
             print(f"Error removing channel: {e}")
 
     def _add_all_campaign_channels(self, campaign):
-        """Add all channels from a campaign"""
+        """Add all channels from a campaign with campaign grouping"""
         count = 0
-        for channel in campaign["channels"]:
+        campaign_id = campaign.get("id")
+        all_channels = campaign.get("channels", [])
+        
+        # Calculate max required time from rewards if campaign has rewards
+        minutes = 120  # Default
+        rewards = campaign.get("rewards", [])
+        if rewards:
+            max_required = 0
+            for reward in rewards:
+                required_units = reward.get("required_units", 0)
+                if required_units > max_required:
+                    max_required = required_units
+            if max_required > 0:
+                minutes = max_required
+        
+        # Get category_id from campaign
+        required_category_id = None
+        category = campaign.get("category", {})
+        if isinstance(category, dict):
+            required_category_id = category.get("id")
+        else:
+            # Try from progress_data
+            progress_data = campaign.get("progress_data", {})
+            if isinstance(progress_data, dict):
+                progress_category = progress_data.get("category", {})
+                if isinstance(progress_category, dict):
+                    required_category_id = progress_category.get("id")
+        
+        for channel in all_channels:
             try:
-                self.config_data.add(channel["url"], 120)  # 120 minutes by default
+                url = channel.get("url") if isinstance(channel, dict) else channel
+                # Store all channels as alternatives for each other
+                campaign_channels = [
+                    {"url": ch.get("url") if isinstance(ch, dict) else ch, 
+                     "username": ch.get("username", "") if isinstance(ch, dict) else ""}
+                    for ch in all_channels
+                ]
+                self.config_data.add(
+                    url, 
+                    minutes, 
+                    campaign_id, 
+                    campaign_channels,
+                    required_category_id=required_category_id,
+                    is_global_drop=False  # Regular drop, not global
+                )
                 count += 1
             except Exception as e:
-                print(f"Error adding channel {channel['username']}: {e}")
+                print(f"Error adding channel {channel.get('username', 'unknown')}: {e}")
 
         self.refresh_list()
         self.status_var.set(f"Added {count} channel(s) from {campaign['name']}")
+        # Auto-start if enabled and queue not running
+        if self.config_data.auto_start and not self.queue_running:
+            self.after(500, self._auto_start_queue)
 
     def _create_tooltip(self, widget, text):
         """Create a tooltip that displays on widget hover"""
@@ -3138,13 +4002,80 @@ class App(ctk.CTk):
         # Note: force_160p only affects new streams (set during initialization)
         # Existing streams will need to be restarted to apply the change
 
+    def on_toggle_auto_start(self):
+        self.config_data.auto_start = bool(self.auto_start_var.get())
+        self.config_data.save()
+        if self.config_data.auto_start and not self.queue_running:
+            # Auto-start if enabled and queue not running
+            if self.config_data.items:
+                self.start_all_in_order()
+    
+
+    def _auto_start_queue(self):
+        """Auto-start queue on launch if enabled"""
+        if not self.queue_running and self.config_data.items:
+            # Check if there are any unfinished items
+            unfinished = [i for i, item in enumerate(self.config_data.items) 
+                         if not item.get("finished")]
+            if unfinished:
+                self.start_all_in_order()
+
+    def _start_offline_retry_monitor(self):
+        """Background thread that periodically checks offline streams and retries them"""
+        def monitor():
+            while True:
+                time.sleep(30)  # Check every 30 seconds
+                try:
+                    if not self.queue_running:
+                        continue
+                    
+                    # Only check if we're not currently running a stream
+                    # (Kick only allows 1 stream at a time)
+                    if len(self.workers) > 0:
+                        continue
+                    
+                    # Find next unfinished item
+                    for idx, item in enumerate(self.config_data.items):
+                        if item.get("finished"):
+                            continue
+                        
+                        if idx in self.workers:
+                            continue  # Already running
+                        
+                        # Check if stream is now live
+                        if kick_is_live_by_api(item["url"]):
+                            # Stream is back online, retry it
+                            self.after(0, lambda i=idx: self._start_index(i))
+                            break  # Only start one at a time
+                except Exception as e:
+                    print(f"Monitor error: {e}")
+                    time.sleep(60)  # Wait longer on error
+        
+        thread = threading.Thread(target=monitor, daemon=True)
+        thread.start()
+
     # ----------- Callbacks Worker -----------
     def on_worker_update(self, idx, seconds, live):
         def ui_update():
+            if idx < 0 or idx >= len(self.config_data.items):
+                return
+            
+            item = self.config_data.items[idx]
+            is_global_drop = item.get("is_global_drop", False)
+            
             if str(idx) in self.tree.get_children():
                 values = list(self.tree.item(str(idx), "values"))
                 tag = self.t("tag_live") if live else self.t("tag_paused")
-                values[2] = f"{seconds}s ({tag})"
+                
+                if is_global_drop:
+                    # Show cumulative time for global drops
+                    cumulative_seconds = item.get("cumulative_time", 0) + seconds
+                    cumulative_minutes = cumulative_seconds // 60
+                    values[2] = f"{cumulative_minutes}m ({tag})"
+                else:
+                    # Regular drop - show individual time
+                    values[2] = f"{seconds}s ({tag})"
+                
                 current_tags = set(self.tree.item(str(idx), "tags") or [])
                 if live:
                     current_tags.discard("paused")
@@ -3153,8 +4084,18 @@ class App(ctk.CTk):
                 self.tree.item(str(idx), values=values, tags=tuple(current_tags))
             
             # Update status bar with elapsed time
-            if idx < len(self.config_data.items):
-                item = self.config_data.items[idx]
+            if is_global_drop:
+                cumulative_seconds = item.get("cumulative_time", 0) + seconds
+                cumulative_minutes = cumulative_seconds // 60
+                secs = cumulative_seconds % 60
+                time_str = f"{cumulative_minutes}m {secs}s" if cumulative_minutes > 0 else f"{secs}s"
+                status = self.t("tag_live") if live else self.t("tag_paused")
+                
+                if self.queue_running and self.queue_current_idx == idx:
+                    self.status_var.set(f"{self.t('queue_running_status', url=item['url'])} - {time_str} cumulative ({status})")
+                else:
+                    self.status_var.set(f"{self.t('status_playing', url=item['url'])} - {time_str} cumulative ({status})")
+            else:
                 minutes = seconds // 60
                 secs = seconds % 60
                 time_str = f"{minutes}m {secs}s" if minutes > 0 else f"{secs}s"
@@ -3174,32 +4115,108 @@ class App(ctk.CTk):
 
             worker = self.workers.get(idx)
             ended_offline = bool(worker and getattr(worker, "ended_because_offline", False))
-            if completed:
-                self.config_data.items[idx]["finished"] = True
+            ended_wrong_category = bool(worker and getattr(worker, "ended_because_wrong_category", False))
+            
+            item = self.config_data.items[idx]
+            is_global_drop = item.get("is_global_drop", False)
+            campaign_id = item.get("campaign_id")
+            
+            # Initialize completed variable
+            # For regular drops, use the value passed from worker
+            # For global drops, we'll recalculate based on cumulative time
+            completed_value = completed  # Store original value from function parameter
+            
+            # Track cumulative time for global drops
+            if is_global_drop and campaign_id:
+                # Add elapsed time to cumulative time for all items in this campaign
+                debug_print(f"DEBUG: Global drop - adding {elapsed} seconds to cumulative time")
+                for other_item in self.config_data.items:
+                    if other_item.get("campaign_id") == campaign_id:
+                        current_cumulative = other_item.get("cumulative_time", 0)
+                        other_item["cumulative_time"] = current_cumulative + elapsed
+                        debug_print(f"DEBUG: Item {other_item['url']} cumulative time: {other_item['cumulative_time']}s")
                 self.config_data.save()
+                
+                # Check if cumulative time reached target
+                target_minutes = item.get("minutes", 0)
+                cumulative_seconds = item.get("cumulative_time", 0)
+                cumulative_minutes = cumulative_seconds // 60
+                
+                debug_print(f"DEBUG: Cumulative time: {cumulative_minutes} minutes / {target_minutes} minutes target")
+                
+                if target_minutes > 0 and cumulative_minutes >= target_minutes:
+                    # Mark all items in campaign as finished
+                    debug_print(f"DEBUG: Target reached! Marking all items in campaign as finished")
+                    for other_item in self.config_data.items:
+                        if other_item.get("campaign_id") == campaign_id:
+                            other_item["finished"] = True
+                    self.config_data.save()
+                    completed_value = True
+                else:
+                    # Not finished yet, continue with other streamers
+                    completed_value = False
+                    debug_print(f"DEBUG: Still need {target_minutes - cumulative_minutes} more minutes")
+            
+            # Use completed_value (always defined - either from function parameter or recalculated for global drops)
+            if completed_value:
+                if not is_global_drop:
+                    # Regular drop - mark individual item as finished
+                    self.config_data.items[idx]["finished"] = True
+                    self.config_data.save()
                 if str(idx) in self.tree.get_children():
                     values = list(self.tree.item(str(idx), "values"))
-                    values[2] = f"{elapsed}s ({self.t('tag_finished')})"
+                    if is_global_drop:
+                        cumulative_minutes = item.get("cumulative_time", 0) // 60
+                        values[2] = f"{cumulative_minutes}m ({self.t('tag_finished')})"
+                    else:
+                        values[2] = f"{elapsed}s ({self.t('tag_finished')})"
                     current_tags = set(self.tree.item(str(idx), "tags") or [])
                     current_tags.add("finished")
                     current_tags.discard("paused")
                     current_tags.discard("redo")
                     self.tree.item(str(idx), values=values, tags=tuple(current_tags))
-            elif ended_offline:
-                if str(idx) in self.tree.get_children():
-                    values = list(self.tree.item(str(idx), "values"))
-                    values[2] = f"{elapsed}s ({self.t('retry')})"
-                    current_tags = set(self.tree.item(str(idx), "tags") or [])
-                    current_tags.add("redo")
-                    current_tags.discard("paused")
-                    current_tags.discard("finished")
-                    self.tree.item(str(idx), values=values, tags=tuple(current_tags))
-                try:
-                    self.status_var.set(
-                        self.t("offline_wait_retry", url=self.config_data.items[idx]["url"])
-                    )
-                except Exception:
-                    pass
+            elif ended_offline or ended_wrong_category:
+                # Try alternative channel from same campaign
+                campaign_channels = item.get("campaign_channels", [])
+                
+                switched = False
+                if campaign_id and campaign_channels:
+                    current_url = item["url"]
+                    # Find next available live channel from same campaign
+                    for alt_channel in campaign_channels:
+                        alt_url = alt_channel.get("url") if isinstance(alt_channel, dict) else alt_channel
+                        if alt_url and alt_url != current_url:
+                            # Check if this alternative is live
+                            if kick_is_live_by_api(alt_url):
+                                # Switch to this alternative channel
+                                self.config_data.items[idx]["url"] = alt_url
+                                self.config_data.save()
+                                self.refresh_list()
+                                switched = True
+                                self.status_var.set(f"Switched to alternative: {alt_url.split('/')[-1]}")
+                                
+                                # Retry with new channel if queue is running
+                                if getattr(self, "queue_running", False):
+                                    self.after(2000, lambda i=idx: self._start_index(i))
+                                    return
+                                break
+                
+                if not switched:
+                    # No alternative found, mark for retry
+                    if str(idx) in self.tree.get_children():
+                        values = list(self.tree.item(str(idx), "values"))
+                        values[2] = f"{elapsed}s ({self.t('retry')})"
+                        current_tags = set(self.tree.item(str(idx), "tags") or [])
+                        current_tags.add("redo")
+                        current_tags.discard("paused")
+                        current_tags.discard("finished")
+                        self.tree.item(str(idx), values=values, tags=tuple(current_tags))
+                    try:
+                        self.status_var.set(
+                            self.t("offline_wait_retry", url=self.config_data.items[idx]["url"])
+                        )
+                    except Exception:
+                        pass
 
             # Continue queue if applicable
             if getattr(self, "queue_running", False) and self.queue_current_idx == idx:
