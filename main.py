@@ -1198,6 +1198,9 @@ class StreamWorker(threading.Thread):
                         print(f"Error setting stream_quality: {e}")
             
             self.driver.get(self.url)
+            
+            # Wait for page to load (give it time for stream to initialize)
+            time.sleep(5)
 
             try:
                 self.ensure_player_state()
@@ -2308,6 +2311,7 @@ class App(ctk.CTk):
                     debug_print(f"DEBUG: Reset tried_channels in _start_index for campaign {item.get('campaign_id')}")
                 
                 # Try to find a live alternative channel that hasn't been tried
+                switched_in_start = False
                 for alt_channel in campaign_channels:
                     alt_url = alt_channel.get("url") if isinstance(alt_channel, dict) else alt_channel
                     if alt_url and alt_url != item["url"] and alt_url not in tried_channels:
@@ -2320,9 +2324,103 @@ class App(ctk.CTk):
                             self.refresh_list()
                             item = self.config_data.items[idx]  # Update item reference
                             debug_print(f"DEBUG: Switched to alternative in _start_index: {alt_url} (tried: {len(tried_channels)}/{len(all_channel_urls)})")
-                            break
+                            self.status_var.set(f"Switched to {alt_url.split('/')[-1]} - waiting for page to load...")
+                            switched_in_start = True
+                            # Wait 8 seconds to allow browser to fully load before checking if stream is live
+                            # Use after() to avoid blocking UI thread
+                            self.after(8000, lambda i=idx: self._start_index_after_switch(i))
+                            return
+                
+                # If we switched, we already scheduled a callback, so return early
+                if switched_in_start:
+                    return
         
         # Check again after potential channel switch
+        if not kick_is_live_by_api(item["url"]):
+            try:
+                values = list(self.tree.item(str(idx), "values"))
+                values[2] = self.t("retry")
+                self.tree.item(str(idx), values=values, tags=("redo",))
+            except Exception:
+                pass
+            self.status_var.set(self.t("offline_wait_retry", url=item["url"]))
+            return
+
+        domain = domain_from_url(item["url"])
+        if not domain:
+            messagebox.showerror(self.t("error"), self.t("invalid_url"))
+            return
+
+        cookie_path = cookie_file_for_domain(domain)
+        if not os.path.exists(cookie_path):
+            # Auto-import cookies silently (no popup for automation)
+            try:
+                if not CookieManager.import_from_browser(domain):
+                    # Only show popup if auto-import fails and we're not in auto mode
+                    if not self.config_data.auto_start:
+                        if messagebox.askyesno(
+                            self.t("cookies_missing_title"), self.t("cookies_missing_msg")
+                        ):
+                            self.obtain_cookies_interactively(item["url"], domain)
+                    else:
+                        # In auto mode, skip items without cookies
+                        self.status_var.set(f"Skipping {item['url']} - no cookies")
+                        return
+            except Exception:
+                if not self.config_data.auto_start:
+                    if messagebox.askyesno(
+                        self.t("cookies_missing_title"), self.t("cookies_missing_msg")
+                    ):
+                        self.obtain_cookies_interactively(item["url"], domain)
+                else:
+                    return
+
+        stop_event = threading.Event()
+        
+        # Setup cumulative time callback for global drops
+        is_global_drop = item.get("is_global_drop", False)
+        cumulative_time_callback = None
+        if is_global_drop:
+            campaign_id = item.get("campaign_id")
+            def get_cumulative_time():
+                """Get current cumulative time for this campaign"""
+                if not campaign_id:
+                    return 0
+                total = 0
+                for other_item in self.config_data.items:
+                    if other_item.get("campaign_id") == campaign_id:
+                        total += other_item.get("cumulative_time", 0)
+                return total
+            cumulative_time_callback = get_cumulative_time
+        
+        worker = StreamWorker(
+            item["url"],
+            item["minutes"],
+            on_update=lambda s, live: self.on_worker_update(idx, s, live),
+            on_finish=lambda e, c: self.on_worker_finish(idx, e, c),
+            stop_event=stop_event,
+            driver_path=self.config_data.chromedriver_path,
+            extension_path=self.config_data.extension_path,
+            hide_player=bool(self.hide_player_var.get()),
+            mute=bool(self.mute_var.get()),
+            mini_player=bool(self.mini_player_var.get()),
+            force_160p=bool(self.config_data.force_160p),
+            required_category_id=item.get("required_category_id"),
+            cumulative_time_callback=cumulative_time_callback,
+        )
+        self.workers[idx] = worker
+        worker.start()
+        self.tree.selection_set(str(idx))
+        self.status_var.set(self.t("status_playing", url=item["url"]))
+
+    def _start_index_after_switch(self, idx):
+        """Continue _start_index after a delay when switching channels"""
+        if idx < 0 or idx >= len(self.config_data.items):
+            return
+        
+        item = self.config_data.items[idx]
+        
+        # Check again after potential channel switch (after delay)
         if not kick_is_live_by_api(item["url"]):
             try:
                 values = list(self.tree.item(str(idx), "values"))
@@ -4248,11 +4346,12 @@ class App(ctk.CTk):
                                 self.refresh_list()
                                 switched = True
                                 debug_print(f"DEBUG: Switched to alternative: {alt_url} (tried: {len(tried_channels)}/{len(all_channel_urls)})")
-                                self.status_var.set(f"Switched to alternative: {alt_url.split('/')[-1]}")
+                                self.status_var.set(f"Switched to alternative: {alt_url.split('/')[-1]} - waiting for page to load...")
                                 
                                 # Retry with new channel if queue is running
+                                # Wait 8 seconds to allow browser to fully load the new stream
                                 if getattr(self, "queue_running", False):
-                                    self.after(2000, lambda i=idx: self._start_index(i))
+                                    self.after(8000, lambda i=idx: self._start_index(i))
                                     return
                                 break
                     
