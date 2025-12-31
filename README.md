@@ -13,7 +13,8 @@ Kick Drop Miner automates watching Kick.com streams so you can keep drop timers 
 - **Cookie workflow** - open a Chrome window to log in manually or import cookies directly from Chrome/Edge/Firefox via `browser_cookie3`; cookies are saved per domain under `./cookies/`.
 - **Playback controls** - toggle mute, hide the `<video>` element, pop out the always-on-top mini player, or keep the normal Chrome window visible.
 - **Profiles that persist** - `config.json` keeps your items, preferences, and paths, while `chrome_data/` stores a reusable Chrome profile and `cookies/` stores auth state.
-- **Multi-language UI** - French, English, and Turkish translations are built in; the selected language and the light/dark theme are remembered.
+- **Multi-language UI** - French, English, Turkish, German, Russian, Polish and Spanish translations are built in.
+- **Themed UI** - light/dark theme are available.
 
 ## Screenshot
 

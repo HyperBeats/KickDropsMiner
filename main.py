@@ -210,6 +210,10 @@ _BUILTIN_TRANSLATIONS_JSON = r'''
     "language_fr": "Français",
     "language_en": "English",
     "language_tr": "Turkish",
+    "language_de": "German",
+    "language_ru": "Russian",
+    "language_pl": "Polish",
+    "language_es": "Spanish",
     "prompt_live_url_title": "Live URL",
     "prompt_live_url_msg": "Enter the Kick live URL:",
     "prompt_minutes_title": "Target (minutes)",
@@ -1623,6 +1627,8 @@ class App(ctk.CTk):
         label = translate(self.config_data.language, label_key)
         if label == label_key:
             label = translate(lang_code, label_key)
+        if label == label_key:
+            label = translate("en", label_key)
         if label == label_key:
             label = lang_code
         return label
