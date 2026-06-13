@@ -43,6 +43,8 @@ class App(ctk.CTk):
         set_debug_config(self.config_data)
         self.workers = {}
         self._interactive_driver = None  # Chrome pour capture de cookies
+        self._settings_window = None
+        self._pending_theme_after = None
         self.queue_running = False
         self.queue_current_idx = None
 
@@ -355,13 +357,36 @@ class App(ctk.CTk):
     # ----------- Theme -----------
     def show_settings_window(self):
         """Open settings window with all toggles and dropdowns"""
+        existing_window = getattr(self, "_settings_window", None)
+        try:
+            if existing_window is not None and existing_window.winfo_exists():
+                existing_window.lift()
+                existing_window.focus_force()
+                return
+        except Exception:
+            self._settings_window = None
+
         # Create settings window
         settings_window = ctk.CTkToplevel(self)
         settings_window.title("Settings")
         settings_window.geometry("450x650")
         settings_window.resizable(False, False)
         settings_window.transient(self)
-        settings_window.grab_set()  # Make it modal
+
+        self._settings_window = settings_window
+
+        def close_settings_window():
+            try:
+                settings_window.grab_release()
+            except Exception:
+                pass
+            try:
+                settings_window.destroy()
+            finally:
+                if getattr(self, "_settings_window", None) is settings_window:
+                    self._settings_window = None
+
+        settings_window.protocol("WM_DELETE_WINDOW", close_settings_window)
         
         # Center the window
         settings_window.update_idletasks()
@@ -472,7 +497,7 @@ class App(ctk.CTk):
         theme_menu = ctk.CTkOptionMenu(
             appearance_section,
             values=[self.t("theme_dark"), self.t("theme_light")],
-            command=self.change_theme,
+            command=lambda choice: self.change_theme(choice, settings_window),
             variable=self.theme_var,
             width=350,
         )
@@ -508,7 +533,7 @@ class App(ctk.CTk):
             settings_window.lift()
             settings_window.focus_force()
             # Refresh the window to update labels
-            settings_window.destroy()
+            close_settings_window()
             self.show_settings_window()
         
         btn_chromedriver = ctk.CTkButton(
@@ -534,7 +559,7 @@ class App(ctk.CTk):
             settings_window.lift()
             settings_window.focus_force()
             # Refresh the window to update labels
-            settings_window.destroy()
+            close_settings_window()
             self.show_settings_window()
         
         btn_extension = ctk.CTkButton(
@@ -558,22 +583,73 @@ class App(ctk.CTk):
         close_btn = ctk.CTkButton(
             settings_window,
             text="Close",
-            command=settings_window.destroy,
+            command=close_settings_window,
             width=200,
         )
         close_btn.pack(pady=15)
 
-    def change_theme(self, choice):
-        # Accepts FR/EN
-        dark = choice in (self.t("theme_dark"), "Sombre", "Dark")
+    def change_theme(self, choice, source_window=None):
+        # CTkOptionMenu invokes this while Tk is still closing the native menu.
+        # Applying the global theme immediately can leave Windows/Tk menu state stale.
+        if getattr(self, "_pending_theme_after", None) is not None:
+            try:
+                self.after_cancel(self._pending_theme_after)
+            except Exception:
+                pass
+        self._pending_theme_after = self.after(
+            150, lambda selected=choice, window=source_window: self._apply_theme(selected, window)
+        )
+
+    def _apply_theme(self, choice, source_window=None):
+        self._pending_theme_after = None
+        self._release_any_grab()
+        reopen_settings = self._destroy_settings_for_theme_change(source_window)
+        dark_values = {"Sombre", "Dark"}
+        try:
+            dark_values.update(
+                translate(lang, "theme_dark") for lang in TRANSLATIONS.keys()
+            )
+        except Exception:
+            pass
+        dark = choice in dark_values
         self.config_data.dark_mode = dark
         self.config_data.save()
+        self.theme_var.set(self.t("theme_dark") if dark else self.t("theme_light"))
         ctk.set_appearance_mode("Dark" if dark else "Light")
         # Rebuild content (to recalculate Treeview styles)
         for w in self.content.winfo_children():
             w.destroy()
         self._build_content()
         self.refresh_list()
+        if reopen_settings:
+            self.after(50, self.show_settings_window)
+
+    def _release_any_grab(self):
+        try:
+            grabbed = self.grab_current()
+            if grabbed is not None:
+                grabbed.grab_release()
+        except Exception:
+            pass
+        try:
+            grabbed_name = self.tk.call("grab", "current")
+            if grabbed_name:
+                self.tk.call("grab", "release", grabbed_name)
+        except Exception:
+            pass
+
+    def _destroy_settings_for_theme_change(self, source_window=None):
+        settings_window = source_window or getattr(self, "_settings_window", None)
+        try:
+            if settings_window is not None and settings_window.winfo_exists():
+                settings_window.destroy()
+                if getattr(self, "_settings_window", None) is settings_window:
+                    self._settings_window = None
+                self.update_idletasks()
+                return True
+        except Exception:
+            self._settings_window = None
+        return False
 
     # ----------- Language -----------
     def change_language(self, choice):
