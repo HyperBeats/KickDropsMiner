@@ -67,11 +67,16 @@
   "btn_add_channel": "Añadir este canal",
   "btn_add_all_channels": "Añadir todos los canales",
   "btn_remove_all_channels": "Eliminar todos los canales",
+  "btn_choose_campaign": "Choose Campaign",
+  "btn_unchoose_campaign": "Remove Campaign",
   "drops_loading": "Cargando campañas...",
   "drops_loaded": "{count} campaña(s) encontrada(s)",
   "drops_error": "Error al cargar las campañas",
   "drops_no_channels": "No hay canales disponibles para esta campaña (o es un Drop Global)",
   "drops_added": "Añadido: {channel}",
+  "drops_campaign_selected": "Campaign selected: {campaign}",
+  "drops_campaign_unselected": "Campaign removed: {campaign}",
+  "drops_campaign_searching": "Searching live streamers: {campaign}",
   "drops_watch_minutes": "Minutos para ver:",
   "warning": "Advertencia",
   "cannot_edit_active_stream": "No se puede editar la duración de una transmisión activa. Por favor, deténla primero.",
@@ -86,4 +91,3 @@
   "btn_refresh_progress": "Actualizar progreso",
   "drops_completed_campaigns": "Campañas completadas"
 }
-

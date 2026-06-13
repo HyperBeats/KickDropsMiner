@@ -10,6 +10,105 @@ from utils.helpers import cookie_file_for_domain, debug_print, _kick_username_fr
 from .browser import make_chrome_driver, CookieManager
 
 
+def _kick_api_headers(extra_headers=None):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Origin": "https://kick.com",
+        "Referer": "https://kick.com/",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return headers
+
+
+def _cookie_header_for_domain(domain):
+    path = cookie_file_for_domain(domain)
+    if not os.path.exists(path):
+        return "", None
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+    except Exception:
+        return "", None
+
+    parts = []
+    session_token = None
+    for cookie in cookies:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if not name or value is None:
+            continue
+        parts.append(f"{name}={value}")
+        if name == "session_token":
+            session_token = value
+    return "; ".join(parts), session_token
+
+
+def _fetch_kick_json(api_url, authenticated=False):
+    headers = _kick_api_headers()
+    if authenticated:
+        cookie_header, session_token = _cookie_header_for_domain("kick.com")
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        if session_token:
+            headers["Authorization"] = f"Bearer {session_token}"
+
+    req = urllib.request.Request(api_url, headers=headers)
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        return json.load(resp)
+
+
+def _campaigns_from_response(response):
+    campaigns = []
+    data = response.get("data", []) if isinstance(response, dict) else []
+
+    if isinstance(data, list):
+        for campaign in data:
+            if not isinstance(campaign, dict):
+                continue
+            category = campaign.get("category", {})
+            if not isinstance(category, dict):
+                category = {}
+            campaign_info = {
+                "id": campaign.get("id"),
+                "name": campaign.get("name", "Unknown Campaign"),
+                "game": category.get("name", "Unknown Game"),
+                "game_slug": category.get("slug", ""),
+                "game_image": category.get("image_url", ""),
+                "status": campaign.get("status", "unknown"),
+                "starts_at": campaign.get("starts_at"),
+                "ends_at": campaign.get("ends_at"),
+                "rewards": campaign.get("rewards", []),
+                "channels": [],
+            }
+
+            channels = campaign.get("channels", [])
+            if isinstance(channels, list):
+                for channel in channels:
+                    if isinstance(channel, dict):
+                        slug = channel.get("slug")
+                        user = channel.get("user", {})
+                        if not isinstance(user, dict):
+                            user = {}
+                        username = user.get("username") or slug
+                        if slug:
+                            campaign_info["channels"].append(
+                                {
+                                    "slug": slug,
+                                    "username": username,
+                                    "url": f"https://kick.com/{slug}",
+                                    "profile_picture": user.get("profile_picture", ""),
+                                }
+                            )
+
+            if campaign_info["channels"] or campaign.get("status") == "active":
+                campaigns.append(campaign_info)
+
+    return campaigns
+
+
 def kick_is_live_by_api(url: str) -> bool:
     """Returns True if the Kick channel is live (via API).
      In case of network error, returns True to avoid blocking the queue.
@@ -92,11 +191,7 @@ def fetch_live_streamers_by_category(category_id, limit=24, driver=None):
     should_close_driver = False
     if driver is None:
         try:
-            driver = make_chrome_driver(headless=False, visible_width=400, visible_height=300)
-            try:
-                driver.set_window_position(-2000, -2000)
-            except:
-                pass
+            driver = make_chrome_driver(headless=True, visible_width=400, visible_height=300)
             driver.get("https://kick.com")
             time.sleep(1)
             
@@ -245,17 +340,18 @@ def fetch_drop_campaigns():
         api_url = "https://web.kick.com/api/v1/drops/campaigns"
 
         print(f"Fetching drops...")
-
-        # ONLY for fetching campaigns: uses a small off-screen window
-        driver = make_chrome_driver(
-            headless=False, visible_width=400, visible_height=300
-        )
-
-        # Position the window off-screen to make it invisible
         try:
-            driver.set_window_position(-2000, -2000)
-        except:
-            pass
+            response = _fetch_kick_json(api_url)
+            campaigns = _campaigns_from_response(response)
+            print(f"Successfully fetched {len(campaigns)} campaigns via direct API")
+            return {"campaigns": campaigns, "driver": None}
+        except Exception as e:
+            print(f"Direct drops API failed, falling back to headless Chrome: {e}")
+
+        # ONLY for fetching campaigns: run Chrome headless.
+        driver = make_chrome_driver(
+            headless=True, visible_width=400, visible_height=300
+        )
         
         # Visit kick.com and load cookies
         print("Establishing Session on kick.com...")
@@ -298,46 +394,7 @@ def fetch_drop_campaigns():
         print(f"We have found {len(response.get('data', []))} campaigns")
 
         # Return data AND driver (to load images)
-        campaigns = []
-        data = response.get("data", [])
-
-        if isinstance(data, list):
-            for campaign in data:
-                # Extract relevant information
-                category = campaign.get("category", {})
-                campaign_info = {
-                    "id": campaign.get("id"),
-                    "name": campaign.get("name", "Unknown Campaign"),
-                    "game": category.get("name", "Unknown Game"),
-                    "game_slug": category.get("slug", ""),
-                    "game_image": category.get("image_url", ""),
-                    "status": campaign.get("status", "unknown"),
-                    "starts_at": campaign.get("starts_at"),
-                    "ends_at": campaign.get("ends_at"),
-                    "rewards": campaign.get("rewards", []),
-                    "channels": [],
-                }
-
-                # Get participating channels
-                channels = campaign.get("channels", [])
-                for channel in channels:
-                    if isinstance(channel, dict):
-                        slug = channel.get("slug")
-                        user = channel.get("user", {})
-                        username = user.get("username") or slug
-                        if slug:
-                            campaign_info["channels"].append(
-                                {
-                                    "slug": slug,
-                                    "username": username,
-                                    "url": f"https://kick.com/{slug}",
-                                    "profile_picture": user.get("profile_picture", ""),
-                                }
-                            )
-
-                # Only add campaigns with at least one channel
-                if campaign_info["channels"] or campaign.get("status") == "active":
-                    campaigns.append(campaign_info)
+        campaigns = _campaigns_from_response(response)
 
         # Retourne les campagnes ET le driver
         return {"campaigns": campaigns, "driver": driver}
@@ -368,17 +425,18 @@ def fetch_drops_progress(driver=None):
         
         if not use_existing_driver:
             print("Fetching drops progress...")
+            try:
+                response = _fetch_kick_json(api_url, authenticated=True)
+                progress_data = response.get("data", []) if isinstance(response, dict) else []
+                print(f"Successfully fetched {len(progress_data)} campaigns with progress via direct API")
+                return {"progress": progress_data, "driver": None}
+            except Exception:
+                debug_print("DEBUG: Direct progress API failed, falling back to headless Chrome")
             
             # Use the same approach as fetch_drop_campaigns
             driver = make_chrome_driver(
-                headless=False, visible_width=400, visible_height=300
+                headless=True, visible_width=400, visible_height=300
             )
-            
-            # Position window off-screen
-            try:
-                driver.set_window_position(-2000, -2000)
-            except:
-                pass
             
             # Visit kick.com and load cookies
             print("Establishing session on kick.com...")
@@ -466,17 +524,27 @@ def fetch_drops_campaigns_and_progress():
         progress_api_url = "https://web.kick.com/api/v1/drops/progress"
         
         print("Fetching drops campaigns and progress...")
+        try:
+            campaigns_response = _fetch_kick_json(campaigns_api_url)
+            campaigns = _campaigns_from_response(campaigns_response)
+            print(f"Successfully fetched {len(campaigns)} campaigns via direct API")
+
+            progress_data = []
+            try:
+                progress_response = _fetch_kick_json(progress_api_url, authenticated=True)
+                progress_data = progress_response.get("data", []) if isinstance(progress_response, dict) else []
+                print(f"Successfully fetched {len(progress_data)} campaigns with progress via direct API")
+            except Exception:
+                debug_print("DEBUG: Direct progress API failed, continuing without progress")
+
+            return {"campaigns": campaigns, "progress": progress_data, "driver": None}
+        except Exception as e:
+            print(f"Direct campaigns API failed, falling back to headless Chrome: {e}")
         
         # Create one driver for both requests
         driver = make_chrome_driver(
-            headless=False, visible_width=400, visible_height=300
+            headless=True, visible_width=400, visible_height=300
         )
-        
-        # Position window off-screen
-        try:
-            driver.set_window_position(-2000, -2000)
-        except:
-            pass
         
         # Visit kick.com and load cookies
         print("Establishing session on kick.com...")
@@ -543,43 +611,7 @@ def fetch_drops_campaigns_and_progress():
         
         # Parse campaigns JSON
         campaigns_response = json.loads(campaigns_text)
-        campaigns = []
-        data = campaigns_response.get("data", [])
-        
-        if isinstance(data, list):
-            for campaign in data:
-                category = campaign.get("category", {})
-                campaign_info = {
-                    "id": campaign.get("id"),
-                    "name": campaign.get("name", "Unknown Campaign"),
-                    "game": category.get("name", "Unknown Game"),
-                    "game_slug": category.get("slug", ""),
-                    "game_image": category.get("image_url", ""),
-                    "status": campaign.get("status", "unknown"),
-                    "starts_at": campaign.get("starts_at"),
-                    "ends_at": campaign.get("ends_at"),
-                    "rewards": campaign.get("rewards", []),
-                    "channels": [],
-                }
-                
-                channels = campaign.get("channels", [])
-                for channel in channels:
-                    if isinstance(channel, dict):
-                        slug = channel.get("slug")
-                        user = channel.get("user", {})
-                        username = user.get("username") or slug
-                        if slug:
-                            campaign_info["channels"].append(
-                                {
-                                    "slug": slug,
-                                    "username": username,
-                                    "url": f"https://kick.com/{slug}",
-                                    "profile_picture": user.get("profile_picture", ""),
-                                }
-                            )
-                
-                if campaign_info["channels"] or campaign.get("status") == "active":
-                    campaigns.append(campaign_info)
+        campaigns = _campaigns_from_response(campaigns_response)
         
         print(f"Successfully fetched {len(campaigns)} campaigns")
         
@@ -600,4 +632,3 @@ def fetch_drops_campaigns_and_progress():
             except:
                 pass
         return {"campaigns": [], "progress": [], "driver": None}
-

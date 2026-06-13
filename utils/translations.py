@@ -76,11 +76,16 @@ _BUILTIN_TRANSLATIONS_JSON = r'''
     "btn_add_channel": "Ajouter cette chaîne",
     "btn_add_all_channels": "Ajouter toutes les chaînes",
     "btn_remove_all_channels": "Supprimer toutes les chaînes",
+    "btn_choose_campaign": "Choisir cette campagne",
+    "btn_unchoose_campaign": "Retirer cette campagne",
     "drops_loading": "Chargement des campagnes...",
     "drops_loaded": "{count} campagne(s) trouvée(s)",
     "drops_error": "Erreur lors du chargement des campagnes",
     "drops_no_channels": "Aucune chaîne disponible pour cette campagne",
     "drops_added": "Ajouté: {channel}",
+    "drops_campaign_selected": "Campagne choisie: {campaign}",
+    "drops_campaign_unselected": "Campagne retiree: {campaign}",
+    "drops_campaign_searching": "Recherche de streamers live: {campaign}",
     "drops_watch_minutes": "Minutes à regarder:",
     "warning": "Attention",
     "cannot_edit_active_stream": "Impossible de modifier la durée d'un stream actif. Veuillez d'abord l'arrêter.",
@@ -161,11 +166,16 @@ _BUILTIN_TRANSLATIONS_JSON = r'''
     "btn_add_channel": "Add This Channel",
     "btn_add_all_channels": "Add All Channels",
     "btn_remove_all_channels": "Remove All Channels",
+    "btn_choose_campaign": "Choose Campaign",
+    "btn_unchoose_campaign": "Remove Campaign",
     "drops_loading": "Loading campaigns...",
     "drops_loaded": "{count} campaign(s) found",
     "drops_error": "Error loading campaigns",
     "drops_no_channels": "No channels available for this campaign (or it is a Global Drop)",
     "drops_added": "Added: {channel}",
+    "drops_campaign_selected": "Campaign selected: {campaign}",
+    "drops_campaign_unselected": "Campaign removed: {campaign}",
+    "drops_campaign_searching": "Searching live streamers: {campaign}",
     "drops_watch_minutes": "Minutes to watch:",
     "warning": "Warning",
     "cannot_edit_active_stream": "Cannot edit the duration of an active stream. Please stop it first.",
@@ -234,4 +244,3 @@ TRANSLATIONS = _merge_fallback(_load_external_translations(), BUILTIN_TRANSLATIO
 def translate(lang: str, key: str) -> str:
     """Translate a key for a given language"""
     return TRANSLATIONS.get(lang or "fr", TRANSLATIONS.get("fr", {})).get(key, key)
-

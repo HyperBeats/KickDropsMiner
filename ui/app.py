@@ -1589,7 +1589,7 @@ class App(ctk.CTk):
 
                     # Display active campaigns first
                     camp_idx = 0
-                    for campaign in active_campaigns:
+                    for campaign in game_active_campaigns:
                         self._create_campaign_display(campaigns_container, campaign, camp_idx, scrollable_frame, game_data, status_label)
                         camp_idx += 1
                     
@@ -1695,6 +1695,20 @@ class App(ctk.CTk):
 
         # Call on UI thread in background to avoid blocking
         threading.Thread(target=display_campaigns, daemon=True).start()
+
+    def _get_campaign_category_id(self, campaign):
+        """Return the Kick category ID attached to a campaign, when available."""
+        category = campaign.get("category", {})
+        if isinstance(category, dict) and category.get("id"):
+            return category.get("id")
+
+        progress_data = campaign.get("progress_data", {})
+        if isinstance(progress_data, dict):
+            progress_category = progress_data.get("category", {})
+            if isinstance(progress_category, dict) and progress_category.get("id"):
+                return progress_category.get("id")
+
+        return campaign.get("category_id")
 
     def _auto_find_streamers_for_game(self, campaign, category_id, scrollable_frame, status_label):
         """Auto-find and add live streamers for a global drop campaign"""
@@ -1826,6 +1840,16 @@ class App(ctk.CTk):
             header = ctk.CTkFrame(campaign_frame, fg_color="transparent")
             header.grid(row=0, column=0, sticky="ew", padx=15, pady=(12, 8))
             header.grid_columnconfigure(1, weight=1)
+            campaign_channels = campaign.get("channels", [])
+            category_id = self._get_campaign_category_id(campaign)
+            campaign_has_channels = bool(campaign_channels)
+            all_channels_added = (
+                campaign_has_channels
+                and all(
+                    self._is_channel_in_list(ch.get("url") if isinstance(ch, dict) else ch)
+                    for ch in campaign_channels
+                )
+            )
 
             campaign_name_label = ctk.CTkLabel(
                 header,
@@ -1863,6 +1887,72 @@ class App(ctk.CTk):
                 pady=4,
             )
             status_badge.grid(row=0, column=2, sticky="e")
+
+            choose_enabled = campaign_has_channels or bool(category_id)
+            choose_btn = ctk.CTkButton(
+                header,
+                text=self.t("btn_unchoose_campaign") if all_channels_added else self.t("btn_choose_campaign"),
+                width=150,
+                height=28,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color=("#ef4444", "#dc2626") if all_channels_added else ("#10b981", "#059669"),
+                hover_color=("#dc2626", "#b91c1c") if all_channels_added else ("#059669", "#047857"),
+                corner_radius=6,
+                state="normal" if choose_enabled else "disabled",
+            )
+            choose_btn.grid(row=0, column=3, sticky="e", padx=(10, 0))
+
+            def choose_campaign(c=campaign, btn=choose_btn, cid=category_id):
+                if c.get("channels"):
+                    all_added_now = all(
+                        self._is_channel_in_list(ch.get("url") if isinstance(ch, dict) else ch)
+                        for ch in c["channels"]
+                    )
+                    if all_added_now:
+                        self._remove_all_campaign_channels(c)
+                        btn.configure(
+                            text=self.t("btn_choose_campaign"),
+                            fg_color=("#10b981", "#059669"),
+                            hover_color=("#059669", "#047857"),
+                        )
+                        if status_label:
+                            status_label.configure(
+                                text=self.t(
+                                    "drops_campaign_unselected",
+                                    campaign=c.get("name", "")
+                                )
+                            )
+                    else:
+                        self._add_all_campaign_channels(c)
+                        btn.configure(
+                            text=self.t("btn_unchoose_campaign"),
+                            fg_color=("#ef4444", "#dc2626"),
+                            hover_color=("#dc2626", "#b91c1c"),
+                        )
+                        if status_label:
+                            status_label.configure(
+                                text=self.t(
+                                    "drops_campaign_selected",
+                                    campaign=c.get("name", "")
+                                )
+                            )
+                    return
+
+                if not cid:
+                    if status_label:
+                        status_label.configure(text="Error: No category_id found for this campaign")
+                    return
+
+                if status_label:
+                    status_label.configure(
+                        text=self.t(
+                            "drops_campaign_searching",
+                            campaign=c.get("name", "")
+                        )
+                    )
+                self._auto_find_streamers_for_game(c, cid, scrollable_frame, status_label)
+
+            choose_btn.configure(command=choose_campaign)
 
             # Display rewards (drops) with images
             rewards = campaign.get("rewards", [])
@@ -2020,21 +2110,6 @@ class App(ctk.CTk):
                 
                 # Button to auto-find streamers for this game
                 # Get category_id from campaign (from progress API or campaigns API)
-                category = campaign.get("category", {})
-                category_id = category.get("id") if isinstance(category, dict) else None
-                
-                # Also check in progress_data if category not found
-                if not category_id:
-                    progress_data = campaign.get("progress_data", {})
-                    if isinstance(progress_data, dict):
-                        progress_category = progress_data.get("category", {})
-                        if isinstance(progress_category, dict):
-                            category_id = progress_category.get("id")
-                
-                # Try alternative structure (if category is not nested)
-                if not category_id:
-                    category_id = campaign.get("category_id")
-                
                 # Always show button, but disable if no category_id
                 def find_streamers(c=campaign, cid=category_id, sl=status_label):
                     if not cid:
@@ -2554,6 +2629,45 @@ class App(ctk.CTk):
         except Exception as e:
             print(f"Error removing channel: {e}")
 
+    def _remove_all_campaign_channels(self, campaign):
+        """Remove all queued channels that belong to a campaign."""
+        try:
+            campaign_urls = {
+                ch.get("url") if isinstance(ch, dict) else ch
+                for ch in campaign.get("channels", [])
+            }
+            campaign_urls.discard(None)
+            if not campaign_urls:
+                return
+
+            new_items = []
+            old_to_new = {}
+            removed_count = 0
+            for old_idx, item in enumerate(self.config_data.items):
+                if item.get("url") in campaign_urls:
+                    removed_count += 1
+                    worker = self.workers.get(old_idx)
+                    if worker:
+                        worker.stop()
+                    continue
+                old_to_new[old_idx] = len(new_items)
+                new_items.append(item)
+
+            if removed_count == 0:
+                return
+
+            self.config_data.items = new_items
+            self.config_data.save()
+            self.workers = {
+                old_to_new[old_idx]: worker
+                for old_idx, worker in self.workers.items()
+                if old_idx in old_to_new
+            }
+            self.refresh_list()
+            self.status_var.set(f"Removed {removed_count} channel(s) from {campaign.get('name', 'campaign')}")
+        except Exception as e:
+            print(f"Error removing campaign channels: {e}")
+
     def _add_all_campaign_channels(self, campaign):
         """Add all channels from a campaign with campaign grouping"""
         count = 0
@@ -2574,20 +2688,13 @@ class App(ctk.CTk):
         
         # Get category_id from campaign
         required_category_id = None
-        category = campaign.get("category", {})
-        if isinstance(category, dict):
-            required_category_id = category.get("id")
-        else:
-            # Try from progress_data
-            progress_data = campaign.get("progress_data", {})
-            if isinstance(progress_data, dict):
-                progress_category = progress_data.get("category", {})
-                if isinstance(progress_category, dict):
-                    required_category_id = progress_category.get("id")
+        required_category_id = self._get_campaign_category_id(campaign)
         
         for channel in all_channels:
             try:
                 url = channel.get("url") if isinstance(channel, dict) else channel
+                if not url or self._is_channel_in_list(url):
+                    continue
                 # Store all channels as alternatives for each other
                 campaign_channels = [
                     {"url": ch.get("url") if isinstance(ch, dict) else ch, 
